@@ -1,6 +1,4 @@
-package main
-
-import "fmt"
+package types
 
 type DataResponse struct {
 	Status  string     `json:"status"`
@@ -30,28 +28,4 @@ type Team struct {
 	Name   string `json:"name"`
 	Score  string `json:"score"`
 	Stroke uint   `json:"stroke"`
-}
-
-type Broadcaster struct {
-	dateText string
-	dateDay  string
-
-	Finished []Match
-	NotStart []Match
-}
-
-func (b *Broadcaster) parseMessage() string {
-	s := ""
-	s += "早上好，今天是" + b.dateText + " " + b.dateDay + "\n"
-	s += "昨日战报：\n"
-	for _, m := range b.Finished {
-		s += m.Date + " " + m.Time + " " + m.Left.Name + " " + m.Left.Score + " : " + m.Right.Score + " " + m.Right.Name + "\n"
-	}
-	s += "今日预告：\n"
-	for _, m := range b.NotStart {
-		s += m.Date + " " + m.Time + " " + m.Left.Name + " VS. " + m.Right.Name + "\n"
-	}
-	s += "今晚几个？"
-	fmt.Println(s)
-	return s
 }

@@ -1,64 +1,39 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
-	"github.com/gocolly/colly"
-	"net/http"
-	"net/url"
+	"github.com/robfig/cron/v3"
+	"log"
 	"time"
+	"worldcup-broadcaster/types"
 )
 
-var (
-	StatusFinish   = "3"
-	StatusNotStart = "4"
+const (
+	baseUrl = "http://127.0.0.1:5700" // baseUrl specified by CQHTTP provider
+
+	GracefulShutdownTimeout = 60 * 60 * 24 * 30 * time.Second // 1 month
 )
 
 func main() {
-
-	b := Broadcaster{}
-	today := time.Now().Format("2006-01-02")
-	tomorrow := time.Now().AddDate(0, 0, 1).Format("2006-01-02")
-	b.dateText = time.Now().Format("01月02日")
-	b.dateDay = time.Now().Weekday().String()
-
-	c := colly.NewCollector()
-	c.MaxDepth = 1
-	c.OnRequest(func(r *colly.Request) {
-		fmt.Println("Visiting", r.URL)
-	})
-	c.OnResponse(func(r *colly.Response) {
-		res := DataResponse{}
-		err := json.Unmarshal(r.Body, &res)
+	cronJob := cron.New(cron.WithChain(
+		cron.SkipIfStillRunning(cron.DiscardLogger),
+	))
+	_, err := cronJob.AddFunc("0 9 * * * ", func() {
+		b := types.NewBroadcaster(baseUrl, "794925183")
+		err := b.Broadcast()
 		if err != nil {
-			fmt.Errorf("parse res: %w", err)
-			return
-		} else if res.Data == nil {
-			fmt.Errorf("without res")
-			return
-		}
-
-		for _, d := range res.Data {
-			for _, m := range d.List {
-				if m.Status == StatusFinish {
-					b.Finished = append(b.Finished, m)
-				} else if m.Status == StatusNotStart {
-					b.NotStart = append(b.NotStart, m)
-				}
-			}
+			log.Printf("on excuting cronjob in %s, meets error: %w\n", time.Now().Format("2006-01-02 15-04"), err)
 		}
 	})
 
-	// yesterday
-	c.Visit("https://tiyu.baidu.com/api/match/%E4%B8%96%E7%95%8C%E6%9D%AF/live/date/" + today + "/direction/forward?from=self")
-	// tomorrow
-	c.Visit("https://tiyu.baidu.com/api/match/%E4%B8%96%E7%95%8C%E6%9D%AF/live/date/" + today + "/direction/after?from=self")
-	// today
-	c.Visit("https://tiyu.baidu.com/api/match/%E4%B8%96%E7%95%8C%E6%9D%AF/live/date/" + tomorrow + "/direction/forward?from=self")
+	if err != nil {
+		panic(err)
+	}
 
-	u := "http://127.0.0.1:5700/send_group_msg"
-	v := url.Values{}
-	v.Add("group_id", "xxx")
-	v.Add("message", b.parseMessage())
-	_, _ = http.PostForm(u, v)
+	cronJob.Start()
+	log.Println("WorldCup broadcaster starts...")
+
+	time.Sleep(GracefulShutdownTimeout)
+
+	cronJob.Stop()
+	log.Println("WorldCup broadcaster stops...")
 }

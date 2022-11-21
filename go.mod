@@ -2,7 +2,10 @@ module worldcup-broadcaster
 
 go 1.19
 
-require github.com/gocolly/colly v1.2.0
+require (
+	github.com/gocolly/colly v1.2.0
+	github.com/robfig/cron/v3 v3.0.1
+)
 
 require (
 	github.com/PuerkitoBio/goquery v1.8.0 // indirect
