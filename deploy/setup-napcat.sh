@@ -14,7 +14,7 @@ docker run -d \
   --restart=always \
   --network host \
   --mac-address "02:42:ac:11:00:99" \
-  -e NAPCAT_UID=0 -e NAPCAT_GID=0 \
+  -e NAPCAT_UID=0 -e NAPCAT_GID=0 ${ACCOUNT:+-e ACCOUNT=$ACCOUNT} \
   -v "$NAPCAT_DIR/config:/app/napcat/config" \
   -v "$NAPCAT_DIR/qq:/app/.config/QQ" \
   mlikiowa/napcat-docker:latest
