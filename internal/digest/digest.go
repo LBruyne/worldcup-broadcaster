@@ -104,6 +104,14 @@ func (d *Digest) sendSplit(text string) {
 		cur = ""
 	}
 	for _, b := range blocks {
+		// A single oversized block (e.g. runaway LLM output) is hard-split
+		// so the message never exceeds the send limit.
+		for len([]rune(b)) > maxMessageRunes {
+			r := []rune(b)
+			flush()
+			d.sender.EnqueueGroup(string(r[:maxMessageRunes]))
+			b = string(r[maxMessageRunes:])
+		}
 		candidate := cur
 		if candidate != "" {
 			candidate += blockSep

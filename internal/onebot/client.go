@@ -23,6 +23,7 @@ type Client struct {
 	logger   *slog.Logger
 
 	queue chan string
+	ctx   context.Context // set by Start; bounds in-flight HTTP on shutdown
 	// OnSendError, when set, is invoked for every failed group send so the
 	// alerter can notify the admin.
 	OnSendError func(error)
@@ -36,12 +37,15 @@ func New(baseURL, token string, groupID int64, interval time.Duration, logger *s
 		interval: interval,
 		http:     &http.Client{Timeout: 15 * time.Second},
 		logger:   logger,
-		queue:    make(chan string, 256),
+		// Sized for a worst-case burst: a restart during several concurrent
+		// live matches can diff hundreds of events at once.
+		queue: make(chan string, 1024),
 	}
 }
 
 // Start launches the queue consumer; it drains until ctx is cancelled.
 func (c *Client) Start(ctx context.Context) {
+	c.ctx = ctx
 	go func() {
 		for {
 			select {
@@ -51,7 +55,10 @@ func (c *Client) Start(ctx context.Context) {
 				if err := c.SendGroupNow(msg); err != nil {
 					c.logger.Error("send group message failed", "error", err)
 					if c.OnSendError != nil {
-						c.OnSendError(err)
+						// Off the consumer goroutine: an alert (private msg
+						// over the same HTTP endpoint) must not stall the
+						// group-message queue.
+						go c.OnSendError(err)
 					}
 				}
 				select {
@@ -131,7 +138,11 @@ func (c *Client) call(path string, payload any) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, c.baseURL+path, bytes.NewReader(raw))
+	ctx := c.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(raw))
 	if err != nil {
 		return err
 	}

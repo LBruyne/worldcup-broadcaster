@@ -83,7 +83,7 @@ func defaults() *Config {
 		LLM: LLM{
 			BaseURL:    "https://api.deepseek.com",
 			Model:      "deepseek-v4-pro",
-			TimeoutSec: 300,
+			TimeoutSec: 180,
 		},
 		Schedule: Schedule{
 			Timezone:    "Asia/Shanghai",
