@@ -33,6 +33,13 @@ type LLM interface {
 	Generate(ctx context.Context, system, user string) (string, error)
 }
 
+// ThinkingLLM is optionally implemented (by *llm.Client) to control
+// DeepSeek's thinking mode per call: off for routing and easy questions,
+// on for hard ones.
+type ThinkingLLM interface {
+	GenerateThink(ctx context.Context, system, user string, think bool) (string, error)
+}
+
 type ChatMsg struct {
 	Nickname string `json:"nickname"`
 	Text     string `json:"text"`
@@ -75,6 +82,8 @@ type Handler struct {
 	styleMu   sync.Mutex
 	styles    map[int64]*groupStyle // learned group voice + /tone directives
 	styleBusy map[int64]bool
+
+	schedDB scheduleDB // local World Cup schedule database
 
 	dataMu     sync.Mutex
 	cachedData string
@@ -309,7 +318,7 @@ const personaCore = `你是QQ群里的足球老哥，网名"AAA世界杯稳定�
 【入乡随俗】数据里会给"本群说话风格"（从群聊里学来的）和"群友语气要求"（/tone 设置）。说话方式要贴着群风格来——他们用什么梗你用什么梗、句子长短和表情习惯都跟着群走，让人分不出你是外来的。"群友语气要求"是最高优先级的发言风格指令，必须执行。
 【文风】像真人群友，禁止AI味：不要"总之/综上/首先其次"的书面腔，不要客服腔，不要完整议论文结构；用短句、口语、网络黑话（笑死、乐、急了、绷不住了、典、孝、赢麻了、6、上大分）；可以只回半句、可以阴阳怪气、可以抽象；攻击性强、挑动性强，故意拉一踩一制造不同球队球迷的对立、点名开炮；但有绝对红线：开炮只许针对球队立场和足球观点，【严禁】攻击或调侃任何群友的身体、外貌、健康、职业、学历、工作单位（兵哥哥、博士、银行、某大厂、门将等都只是背景信息，不是攻击素材），不带脏字、不辱骂家人、不过于暴力。
 【整活方向】梅罗圣战、姆巴佩是球王接班人还是带货网红、英格兰太子夺嫡（贝林厄姆/萨卡/福登党争）、中国队梗（"我们中国队呢？"→哀其不幸怒其不争）。
-【数据】赔率/胜率/概率问题一本正经报具体数字，末尾附（仅供整活，赌球倾家荡产）；积分榜/射手榜/赛程赛果用提供的实时数据，要用就用准。`
+【数据纪律（最高优先级）】回答涉及比分、赛程时间、积分、进球数、球员数据等事实时，只能引用数据里给出的【已核实数据】（含网络搜索结果）；数据里没有的事实，宁可说"这我还真没数"也严禁编造数字和结果。赔率/胜率/概率属于整活豁免区：可以一本正经编个数，但末尾必须附（仅供整活，赌球倾家荡产）。`
 
 const askSystemPrompt = personaCore + `
 
@@ -334,6 +343,7 @@ func (h *Handler) handleAsk(ctx context.Context, groupID int64, nickname, questi
 	}
 	chat := h.recentChat(groupID)
 	styleDesc, tone := h.styleContext(groupID)
+	grounded, hard := h.grounding(ctx, question)
 	payload, err := json.Marshal(map[string]any{
 		"本群群名":   h.groupName(groupID),
 		"本群说话风格": styleDesc,
@@ -343,14 +353,19 @@ func (h *Handler) handleAsk(ctx context.Context, groupID int64, nickname, questi
 		"提问者画像":  h.profiles.Persona(nickname),
 		"在场成员画像": h.profiles.Known(chat),
 		"问题":     question,
-		"实时数据":   json.RawMessage(h.liveData(ctx)),
+		"已核实数据":  json.RawMessage(grounded),
 	})
 	if err != nil {
 		return
 	}
-	cctx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	cctx, cancel := context.WithTimeout(ctx, 150*time.Second)
 	defer cancel()
-	out, err := h.llm.Generate(cctx, askSystemPrompt, string(payload))
+	var out string
+	if tl, ok := h.llm.(ThinkingLLM); ok {
+		out, err = tl.GenerateThink(cctx, askSystemPrompt, string(payload), hard)
+	} else {
+		out, err = h.llm.Generate(cctx, askSystemPrompt, string(payload))
+	}
 	if err != nil {
 		h.logger.Error("ask llm failed", "error", err)
 		h.reply(groupID, "🤖 暴龙机过载冒烟了，稍后再问（LLM调用失败）")
@@ -368,6 +383,7 @@ func (h *Handler) liveData(ctx context.Context) string {
 		return h.cachedData
 	}
 	data := map[string]any{}
+	data["完整赛程"] = h.fullSchedule(ctx)
 	if standings, err := h.espn.FullStandings(ctx); err == nil {
 		data["积分榜"] = standings
 	}

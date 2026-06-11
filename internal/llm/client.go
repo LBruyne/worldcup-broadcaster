@@ -35,10 +35,15 @@ type message struct {
 	Content string `json:"content"`
 }
 
+type thinking struct {
+	Type string `json:"type"` // "enabled" | "disabled"
+}
+
 type request struct {
 	Model           string    `json:"model"`
 	Messages        []message `json:"messages"`
-	ReasoningEffort string    `json:"reasoning_effort"`
+	ReasoningEffort string    `json:"reasoning_effort,omitempty"`
+	Thinking        *thinking `json:"thinking,omitempty"`
 }
 
 type response struct {
@@ -52,19 +57,32 @@ type response struct {
 	} `json:"error"`
 }
 
-// Generate runs one chat completion and returns the assistant text.
+// Generate runs one chat completion with thinking enabled (the default for
+// quality-sensitive digest content).
 func (c *Client) Generate(ctx context.Context, system, user string) (string, error) {
+	return c.GenerateThink(ctx, system, user, true)
+}
+
+// GenerateThink controls DeepSeek's thinking mode per call: disabled for
+// cheap/fast routing and easy questions, enabled for hard ones.
+func (c *Client) GenerateThink(ctx context.Context, system, user string, think bool) (string, error) {
 	if c.apiKey == "" {
 		return "", errors.New("llm api key not configured")
 	}
-	raw, err := json.Marshal(request{
+	req0 := request{
 		Model: c.model,
 		Messages: []message{
 			{Role: "system", Content: system},
 			{Role: "user", Content: user},
 		},
-		ReasoningEffort: "high",
-	})
+	}
+	if think {
+		req0.ReasoningEffort = "high"
+		req0.Thinking = &thinking{Type: "enabled"}
+	} else {
+		req0.Thinking = &thinking{Type: "disabled"}
+	}
+	raw, err := json.Marshal(req0)
 	if err != nil {
 		return "", err
 	}

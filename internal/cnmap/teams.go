@@ -79,6 +79,17 @@ var placeholders = []struct {
 	{regexp.MustCompile(`^Semifinal (\d+) Loser$`), "半决赛第%s场负者"},
 }
 
+// EnglishName resolves a Chinese team name back to the ESPN displayName;
+// returns the input unchanged when unknown (it may already be English).
+func EnglishName(cn string) string {
+	for en, t := range teams {
+		if t.cn == cn {
+			return en
+		}
+	}
+	return cn
+}
+
 // Name returns the Chinese name for an ESPN displayName, or the original
 // string when unknown.
 func Name(displayName string) string {
