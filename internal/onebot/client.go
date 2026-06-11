@@ -99,6 +99,27 @@ func (c *Client) SendPrivate(userID int64, msg string) error {
 	})
 }
 
+// WaitIdle blocks until the send queue drains (plus one interval for the
+// in-flight message) or ctx expires. Used by one-shot CLI runs.
+func (c *Client) WaitIdle(ctx context.Context) {
+	for {
+		if len(c.queue) == 0 {
+			select {
+			case <-time.After(c.interval + time.Second):
+			case <-ctx.Done():
+			}
+			if len(c.queue) == 0 {
+				return
+			}
+		}
+		select {
+		case <-time.After(100 * time.Millisecond):
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 type apiResponse struct {
 	Status  string `json:"status"`
 	Retcode int    `json:"retcode"`
