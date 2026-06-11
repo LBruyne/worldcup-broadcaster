@@ -15,6 +15,13 @@ type OneBot struct {
 	GroupID        int64  `yaml:"group_id"`
 	AdminQQ        int64  `yaml:"admin_qq"`
 	SendIntervalMS int    `yaml:"send_interval_ms"`
+	// ListenAddr receives NapCat event pushes (group chat commands).
+	// Empty disables the QA feature.
+	ListenAddr string `yaml:"listen_addr"`
+}
+
+type QA struct {
+	HistorySize int `yaml:"history_size"` // chat context window for /ask
 }
 
 type ESPN struct {
@@ -61,6 +68,7 @@ type Config struct {
 	LLM      LLM      `yaml:"llm"`
 	Schedule Schedule `yaml:"schedule"`
 	Events   Events   `yaml:"events"`
+	QA       QA       `yaml:"qa"`
 	DataDir  string   `yaml:"data_dir"`
 	Log      Log      `yaml:"log"`
 
@@ -75,7 +83,9 @@ func defaults() *Config {
 		OneBot: OneBot{
 			BaseURL:        "http://127.0.0.1:3000",
 			SendIntervalMS: 1500,
+			ListenAddr:     "127.0.0.1:3100",
 		},
+		QA: QA{HistorySize: 20},
 		ESPN: ESPN{
 			League:          "fifa.world",
 			PollIntervalSec: 20,

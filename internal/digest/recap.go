@@ -59,7 +59,7 @@ func (d *Digest) Recap(ctx context.Context, date string) error {
 		ev := &events[i]
 		home, away := homeAway(ev)
 		rm := recapMatch{
-			ID: ev.ID, Stage: stageName(ev.Season.Slug),
+			ID: ev.ID, Stage: StageName(ev.Season.Slug),
 			Home: home.Team.DisplayName, Away: away.Team.DisplayName,
 			HomeScore: home.Score, AwayScore: away.Score,
 			Detail:   ev.Status.Type.Detail,

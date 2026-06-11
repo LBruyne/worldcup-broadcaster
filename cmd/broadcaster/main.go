@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -24,6 +25,7 @@ import (
 	"worldcup-broadcaster/internal/espn"
 	"worldcup-broadcaster/internal/llm"
 	"worldcup-broadcaster/internal/onebot"
+	"worldcup-broadcaster/internal/qa"
 	"worldcup-broadcaster/internal/store"
 	"worldcup-broadcaster/internal/watcher"
 )
@@ -33,6 +35,7 @@ func main() {
 	runPreview := flag.Bool("run-preview-now", false, "send tomorrow's preview immediately and exit")
 	runRecap := flag.Bool("run-recap-now", false, "send today's recap immediately and exit")
 	dateOverride := flag.String("date", "", "China date (2006-01-02) override for manual runs")
+	simFixture := flag.String("simulate-fixture", "", "replay a summary fixture's events to the group and exit (live-flow drill)")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
@@ -76,6 +79,17 @@ func main() {
 	today := func() string { return time.Now().In(loc).Format("2006-01-02") }
 	tomorrow := func() string { return time.Now().In(loc).AddDate(0, 0, 1).Format("2006-01-02") }
 
+	// One-shot live-broadcast drill: replay all events of a recorded match
+	// through the real formatting/queue/NapCat chain.
+	if *simFixture != "" {
+		if err := simulateFixture(ctx, *simFixture, cfg, bot, logger); err != nil {
+			logger.Error("simulation failed", "error", err)
+			os.Exit(1)
+		}
+		bot.WaitIdle(ctx)
+		return
+	}
+
 	// One-shot manual modes (used for dry runs and catch-up sends).
 	if *runPreview || *runRecap {
 		if *runPreview {
@@ -100,6 +114,20 @@ func main() {
 		return
 	}
 
+	if cfg.OneBot.ListenAddr != "" {
+		var qaLLM qa.LLM
+		if llmClient != nil {
+			qaLLM = llmClient
+		}
+		qaHandler := qa.NewHandler(cfg.OneBot.GroupID, bot, qaLLM, dig, espnClient, cfg.QA.HistorySize, logger)
+		go func() {
+			if err := qa.StartServer(ctx, cfg.OneBot.ListenAddr, qaHandler, logger); err != nil {
+				logger.Error("qa server failed", "error", err)
+				alerter.Alert("qa", "群命令监听服务启动失败: "+err.Error())
+			}
+		}()
+	}
+
 	sched := newMatchScheduler(w, espnClient, alerter, logger)
 
 	c := cron.New(cron.WithLocation(loc), cron.WithChain(cron.SkipIfStillRunning(cron.DiscardLogger)))
@@ -122,6 +150,33 @@ func main() {
 	<-ctx.Done()
 	logger.Info("shutting down")
 	<-c.Stop().Done()
+}
+
+// simulateFixture replays every event of a recorded match summary through
+// the real render + queue + OneBot chain, for verifying the live pipeline
+// end-to-end against the actual QQ group.
+func simulateFixture(ctx context.Context, path string, cfg *config.Config, bot *onebot.Client, logger *slog.Logger) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var sum espn.Summary
+	if err := json.Unmarshal(raw, &sum); err != nil {
+		return fmt.Errorf("parse fixture: %w", err)
+	}
+	events := watcher.Diff(&sum, func(string) bool { return false })
+	logger.Info("simulation starting", "fixture", path, "events", len(events))
+	bot.EnqueueGroup("🧪 [演习] 实时播报链路测试开始：重放2022世界杯决赛全场事件流")
+	sent := 0
+	for _, e := range events {
+		if watcher.Enabled(e.Type, cfg.Events) {
+			bot.EnqueueGroup(watcher.Render(e))
+			sent++
+		}
+	}
+	bot.EnqueueGroup(fmt.Sprintf("🧪 [演习] 重放完毕，共 %d 条事件消息。实战今晚见！", sent))
+	logger.Info("simulation enqueued", "messages", sent)
+	return nil
 }
 
 func mustAdd(c *cron.Cron, spec string, fn func()) {

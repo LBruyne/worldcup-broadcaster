@@ -154,7 +154,7 @@ func writeBoard(sb *strings.Builder, entries []LeaderEntry, unit string) {
 }
 
 // renderGroupTable renders one group's table with qualification marks.
-func renderGroupTable(g espn.GroupStanding) string {
+func RenderGroupTable(g espn.GroupStanding) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "📊 %s组积分榜：\n", g.Letter)
 	for _, e := range g.Entries {

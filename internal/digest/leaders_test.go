@@ -73,7 +73,7 @@ func TestRenderGroupTable(t *testing.T) {
 		{Team: "Mexico", Rank: 1, Points: 3, Wins: 1, Played: 1, GoalDiff: 2, Advanced: "Advanced to round of 32"},
 		{Team: "South Africa", Rank: 2, Points: 0, Losses: 1, Played: 1, GoalDiff: -2},
 	}}
-	got := renderGroupTable(g)
+	got := RenderGroupTable(g)
 	for _, want := range []string{"📊 A组积分榜", "1. 墨西哥 3分（1胜0平0负 净胜+2） ✅晋级", "2. 南非 0分（0胜0平1负 净胜-2）"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("table missing %q:\n%s", want, got)

@@ -52,7 +52,7 @@ func (d *Digest) Preview(ctx context.Context, date string) error {
 		home, away := homeAway(ev)
 		pm := previewMatch{
 			ID:       ev.ID,
-			Stage:    stageName(ev.Season.Slug),
+			Stage:    StageName(ev.Season.Slug),
 			Home:     home.Team.DisplayName,
 			Away:     away.Team.DisplayName,
 			HomeForm: home.Form,
@@ -138,7 +138,7 @@ func renderStandingsSection(all []espn.GroupStanding, teams map[string]bool) str
 	}
 	parts := make([]string, 0, len(groups))
 	for _, g := range groups {
-		parts = append(parts, renderGroupTable(g))
+		parts = append(parts, RenderGroupTable(g))
 	}
 	return strings.Join(parts, "\n\n")
 }

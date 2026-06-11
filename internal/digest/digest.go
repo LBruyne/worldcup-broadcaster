@@ -53,7 +53,7 @@ func displayDate(date string) string {
 	return fmt.Sprintf("%d月%d日 %s", int(t.Month()), t.Day(), weekdays[t.Weekday()])
 }
 
-func stageName(slug string) string {
+func StageName(slug string) string {
 	switch slug {
 	case "group-stage":
 		return "小组赛"
