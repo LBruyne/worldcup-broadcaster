@@ -422,8 +422,11 @@ func TestAskCarriesPersonas(t *testing.T) {
 	if !strings.Contains(llm.gotUser, "数据决定一切") {
 		t.Errorf("asker persona missing: %.300s", llm.gotUser)
 	}
-	if !strings.Contains(llm.gotSys, "梅西强无敌") && !strings.Contains(llm.gotSys, "梅西比C罗强") {
-		t.Error("messi-supremacy rule missing from persona core")
+	if !strings.Contains(llm.gotSys, "梅西其实更强") {
+		t.Error("hidden messi-supremacy rule missing from persona core")
+	}
+	if !strings.Contains(llm.gotSys, "绝不主动提梅西") {
+		t.Error("subtlety rule missing from persona core")
 	}
 }
 
