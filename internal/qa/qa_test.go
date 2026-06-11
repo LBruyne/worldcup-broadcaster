@@ -374,7 +374,7 @@ func TestEngageProactiveProbability(t *testing.T) {
 		t.Errorf("mode missing: %.200s", llm.gotUser)
 	}
 	// seed personas must ride along
-	if !strings.Contains(llm.gotSys, "梅罗弹药库") {
+	if !strings.Contains(llm.gotSys, "梅罗话题的打法") {
 		t.Error("persona core missing from engage prompt")
 	}
 
