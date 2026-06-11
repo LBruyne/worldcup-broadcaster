@@ -86,9 +86,9 @@ func snapshotAt(t *testing.T, full *espn.Summary, n int, state, homeScore, awayS
 func TestWatchReplaysFullMatch(t *testing.T) {
 	full := loadFinal(t)
 	snaps := [][]byte{
-		snapshotAt(t, full, 0, "in", "0", "0", false),  // pre/early, nothing yet
-		snapshotAt(t, full, 2, "in", "1", "0", false),  // kickoff + messi pen
-		snapshotAt(t, full, 5, "in", "2", "0", false),  // + goal + 2 subs
+		snapshotAt(t, full, 0, "in", "0", "0", false),   // pre/early, nothing yet
+		snapshotAt(t, full, 2, "in", "1", "0", false),   // kickoff + messi pen
+		snapshotAt(t, full, 5, "in", "2", "0", false),   // + goal + 2 subs
 		snapshotAt(t, full, 37, "post", "3", "3", true), // everything incl. shootout + end
 	}
 	var idx atomic.Int32

@@ -55,20 +55,20 @@ type Event struct {
 
 // keyEvent type.id constants observed from ESPN data.
 const (
-	typeGoal            = "70"
-	typeSubstitution    = "76"
-	typeKickoff         = "80"
-	typeHalftime        = "81"
-	typeStart2ndHalf    = "82"
-	typeEndRegularTime  = "83"
-	typeStartExtraTime  = "84"
-	typeHalftimeET      = "85"
-	typeStart2ndHalfET  = "86"
-	typeEndExtraTime    = "87"
-	typeStartShootout   = "88"
-	typeEndMatch        = "89"
-	typeYellowCard      = "94"
-	typePenaltyScored   = "98"
+	typeGoal           = "70"
+	typeSubstitution   = "76"
+	typeKickoff        = "80"
+	typeHalftime       = "81"
+	typeStart2ndHalf   = "82"
+	typeEndRegularTime = "83"
+	typeStartExtraTime = "84"
+	typeHalftimeET     = "85"
+	typeStart2ndHalfET = "86"
+	typeEndExtraTime   = "87"
+	typeStartShootout  = "88"
+	typeEndMatch       = "89"
+	typeYellowCard     = "94"
+	typePenaltyScored  = "98"
 )
 
 // scoreFromText parses "Goal!  Argentina 2, France 0. ..." so buffered goal

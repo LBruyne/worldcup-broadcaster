@@ -38,11 +38,11 @@ func TestUnknownFallsBack(t *testing.T) {
 
 func TestPlaceholders(t *testing.T) {
 	cases := map[string]string{
-		"Group A Winner":             "A组第一",
-		"Group L 2nd Place":          "L组第二",
-		"Round of 32 14 Winner":      "32强赛第14场胜者",
-		"Quarterfinal 2 Winner":      "1/4决赛第2场胜者",
-		"Semifinal 1 Loser":          "半决赛第1场负者",
+		"Group A Winner":              "A组第一",
+		"Group L 2nd Place":           "L组第二",
+		"Round of 32 14 Winner":       "32强赛第14场胜者",
+		"Quarterfinal 2 Winner":       "1/4决赛第2场胜者",
+		"Semifinal 1 Loser":           "半决赛第1场负者",
 		"Third Place Group A/B/C/D/F": "小组第三（A/B/C/D/F组之一）",
 	}
 	for in, want := range cases {

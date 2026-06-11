@@ -44,8 +44,8 @@ type Competitor struct {
 }
 
 type Team struct {
-	ID          string `json:"id"`
-	DisplayName string `json:"displayName"`
+	ID           string `json:"id"`
+	DisplayName  string `json:"displayName"`
 	Abbreviation string `json:"abbreviation"`
 }
 

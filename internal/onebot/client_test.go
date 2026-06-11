@@ -13,10 +13,10 @@ import (
 )
 
 type recorded struct {
-	path  string
-	auth  string
-	body  map[string]any
-	at    time.Time
+	path string
+	auth string
+	body map[string]any
+	at   time.Time
 }
 
 func fakeNapCat(t *testing.T, fail bool) (*httptest.Server, *[]recorded, *sync.Mutex) {

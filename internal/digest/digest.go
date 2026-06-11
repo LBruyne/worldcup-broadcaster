@@ -168,7 +168,7 @@ func standingsBlock(raw json.RawMessage) string {
 		}
 		played := false
 		type row struct {
-			rank             int
+			rank                   int
 			team, pts, w, t, l, gd string
 		}
 		rows := make([]row, 0, len(g.Standings.Entries))

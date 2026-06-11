@@ -1,0 +1,16 @@
+[Unit]
+Description=2026 World Cup QQ group broadcaster
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/worldcup
+ExecStart=/opt/worldcup/broadcaster -config /opt/worldcup/config.yaml
+Restart=always
+RestartSec=5
+# Optional secrets, e.g. LLM_API_KEY=sk-... (chmod 600)
+EnvironmentFile=-/opt/worldcup/env
+
+[Install]
+WantedBy=multi-user.target
