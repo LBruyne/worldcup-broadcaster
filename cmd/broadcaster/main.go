@@ -127,7 +127,17 @@ func main() {
 		if llmClient != nil {
 			qaLLM = llmClient
 		}
-		qaHandler := qa.NewHandler(cfg.OneBot.GroupIDs, cfg.QA.GroupNames, bot, qaLLM, dig, espnClient, cfg.QA.HistorySize, logger)
+		qaHandler := qa.NewHandler(qa.Options{
+			GroupIDs:       cfg.OneBot.GroupIDs,
+			GroupNames:     cfg.QA.GroupNames,
+			AdminQQ:        cfg.OneBot.AdminQQ,
+			HistorySize:    cfg.QA.HistorySize,
+			EngageProb:     cfg.QA.EngageProbability,
+			EngageCooldown: time.Duration(cfg.QA.EngageCooldownMin) * time.Minute,
+			FollowupWindow: time.Duration(cfg.QA.FollowupWindowSec) * time.Second,
+			SeedPersonas:   cfg.QA.SeedPersonas,
+		}, bot, qaLLM, dig, espnClient, st, logger)
+		qaHandler.SetMemberLister(bot)
 		go func() {
 			if err := qa.StartServer(ctx, cfg.OneBot.ListenAddr, qaHandler, logger); err != nil {
 				logger.Error("qa server failed", "error", err)

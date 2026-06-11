@@ -34,6 +34,12 @@ type QA struct {
 	// GroupNames maps group id -> the in-persona name for that group
 	// (e.g. the production group is to be called 示例群).
 	GroupNames map[int64]string `yaml:"group_names"`
+	// EngageProbability is the chance of proactively joining a topic.
+	EngageProbability float64 `yaml:"engage_probability"`
+	EngageCooldownMin int     `yaml:"engage_cooldown_min"`
+	FollowupWindowSec int     `yaml:"followup_window_sec"`
+	// SeedPersonas are initial member personas keyed by nickname.
+	SeedPersonas map[string]string `yaml:"seed_personas"`
 }
 
 type ESPN struct {
@@ -99,7 +105,12 @@ func defaults() *Config {
 			KeepaliveIntervalMin: 3,
 			RestartCmd:           "docker restart napcat",
 		},
-		QA: QA{HistorySize: 20},
+		QA: QA{
+			HistorySize:       40,
+			EngageProbability: 0.15,
+			EngageCooldownMin: 4,
+			FollowupWindowSec: 180,
+		},
 		ESPN: ESPN{
 			League:          "fifa.world",
 			PollIntervalSec: 20,

@@ -91,7 +91,7 @@ func StartServer(ctx context.Context, addr string, h *Handler, logger *slog.Logg
 			return
 		}
 		// Commands may hit ESPN/LLM; never block NapCat's push loop.
-		go h.OnGroupMessage(ctx, ev.GroupID, ev.displayName(), ev.messageText())
+		go h.OnGroupMessage(ctx, ev.GroupID, ev.UserID, ev.displayName(), ev.messageText())
 	})
 
 	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}

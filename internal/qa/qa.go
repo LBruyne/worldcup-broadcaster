@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"strings"
 	"sync"
 	"time"
@@ -14,10 +15,18 @@ import (
 	"worldcup-broadcaster/internal/cnmap"
 	"worldcup-broadcaster/internal/digest"
 	"worldcup-broadcaster/internal/espn"
+	"worldcup-broadcaster/internal/store"
 )
 
 type Sender interface {
 	EnqueueGroupTo(groupID int64, msg string)
+	SendPrivate(userID int64, msg string) error
+}
+
+// MemberLister is satisfied by *onebot.Client; used to enumerate group
+// members when the bot joins so every member gets an initial profile stub.
+type MemberLister interface {
+	GroupMembers(groupID int64) ([]string, error)
 }
 
 type LLM interface {
@@ -29,6 +38,21 @@ type ChatMsg struct {
 	Text     string `json:"text"`
 }
 
+// BotName is how the bot's own past messages are labelled in chat context.
+const BotName = "AAA世界杯稳定盈利"
+
+// Options bundles handler tuning knobs.
+type Options struct {
+	GroupIDs       []int64
+	GroupNames     map[int64]string
+	AdminQQ        int64
+	HistorySize    int
+	EngageProb     float64       // probability of proactively joining a topic
+	EngageCooldown time.Duration // min gap between proactive interjections
+	FollowupWindow time.Duration // window after bot spoke to judge follow-ups
+	SeedPersonas   map[string]string
+}
+
 type Handler struct {
 	groups     map[int64]bool
 	groupNames map[int64]string
@@ -37,28 +61,48 @@ type Handler struct {
 	dig        *digest.Digest
 	espn       *espn.Client
 	logger     *slog.Logger
-	histSize   int
+	opts       Options
+	profiles   *Profiles
+	members    MemberLister   // optional; nil in tests
+	randFloat  func() float64 // injectable for tests
 
-	mu      sync.Mutex
-	history map[int64][]ChatMsg // per-group rolling chat context
+	mu         sync.Mutex
+	history    map[int64][]ChatMsg // per-group rolling chat context
+	lastBotMsg map[int64]time.Time // last conversational reply per group
+	lastEngage map[int64]time.Time // last proactive interjection per group
+	engageBusy map[int64]bool      // single-flight engagement per group
 
 	dataMu     sync.Mutex
 	cachedData string
 	cachedAt   time.Time
 }
 
-func NewHandler(groupIDs []int64, groupNames map[int64]string, sender Sender, llm LLM, dig *digest.Digest, client *espn.Client, histSize int, logger *slog.Logger) *Handler {
-	if histSize <= 0 {
-		histSize = 20
+func NewHandler(opts Options, sender Sender, llm LLM, dig *digest.Digest, client *espn.Client, st *store.Store, logger *slog.Logger) *Handler {
+	if opts.HistorySize <= 0 {
+		opts.HistorySize = 40
 	}
-	groups := make(map[int64]bool, len(groupIDs))
-	for _, g := range groupIDs {
+	if opts.EngageProb <= 0 {
+		opts.EngageProb = 0.15
+	}
+	if opts.EngageCooldown <= 0 {
+		opts.EngageCooldown = 4 * time.Minute
+	}
+	if opts.FollowupWindow <= 0 {
+		opts.FollowupWindow = 3 * time.Minute
+	}
+	groups := make(map[int64]bool, len(opts.GroupIDs))
+	for _, g := range opts.GroupIDs {
 		groups[g] = true
 	}
 	return &Handler{
-		groups: groups, groupNames: groupNames, sender: sender, llm: llm, dig: dig, espn: client,
-		histSize: histSize, logger: logger,
-		history: make(map[int64][]ChatMsg),
+		groups: groups, groupNames: opts.GroupNames, sender: sender, llm: llm, dig: dig, espn: client,
+		opts: opts, logger: logger,
+		profiles:   NewProfiles(st, llm, opts.SeedPersonas, logger),
+		randFloat:  rand.Float64,
+		history:    make(map[int64][]ChatMsg),
+		lastBotMsg: make(map[int64]time.Time),
+		lastEngage: make(map[int64]time.Time),
+		engageBusy: make(map[int64]bool),
 	}
 }
 
@@ -67,8 +111,12 @@ func (h *Handler) groupName(groupID int64) string {
 	return h.groupNames[groupID]
 }
 
+// SetMemberLister wires the OneBot member-list API (optional).
+func (h *Handler) SetMemberLister(m MemberLister) { h.members = m }
+
 // OnSelfJoin fires when the bot account itself enters a configured group:
-// it introduces itself and lists the available commands.
+// it introduces itself, stubs a profile for every member, and asks the
+// admin (via private message) to provide initial personas.
 func (h *Handler) OnSelfJoin(groupID int64) {
 	if !h.groups[groupID] {
 		return
@@ -79,17 +127,64 @@ func (h *Handler) OnSelfJoin(groupID int64) {
 	}
 	h.logger.Info("self joined group, sending intro", "group", groupID)
 	h.reply(groupID, greet+"\n\n"+helpText)
+
+	if h.members == nil || h.opts.AdminQQ == 0 {
+		return
+	}
+	names, err := h.members.GroupMembers(groupID)
+	if err != nil {
+		h.logger.Error("member list fetch failed", "group", groupID, "error", err)
+		return
+	}
+	var unset []string
+	for _, n := range names {
+		if n == BotName {
+			continue
+		}
+		h.profiles.Ensure(n)
+		if h.profiles.Persona(n) == "" {
+			unset = append(unset, n)
+		}
+	}
+	msg := fmt.Sprintf("📋 已进群 %d，成员 %d 人。\n未设置初始人设的成员：%s\n\n在群里用命令设置（仅你可用）：\n/人设 昵称 人设描述\n查询：/人设 昵称",
+		groupID, len(names), strings.Join(unset, "、"))
+	if err := h.sender.SendPrivate(h.opts.AdminQQ, msg); err != nil {
+		h.logger.Error("admin member-list notice failed", "error", err)
+	}
+}
+
+// cmdPersona handles "/人设 昵称 [人设文本]": admin sets, anyone queries.
+func (h *Handler) cmdPersona(userID int64, arg string) string {
+	if arg == "" {
+		return "用法：/人设 昵称 （查询）或 /人设 昵称 人设描述（管理员设置）"
+	}
+	parts := strings.SplitN(arg, " ", 2)
+	nick := strings.TrimSpace(parts[0])
+	if len(parts) == 1 {
+		if p := h.profiles.Persona(nick); p != "" {
+			return fmt.Sprintf("👤 %s：%s", nick, p)
+		}
+		return fmt.Sprintf("👤 %s 还没有人设画像（管理员可用 /人设 %s 描述 来设置）", nick, nick)
+	}
+	if userID != h.opts.AdminQQ {
+		return "⛔ 只有管理员能设置人设"
+	}
+	persona := strings.TrimSpace(parts[1])
+	h.profiles.SetPersona(nick, persona)
+	return fmt.Sprintf("✅ 已设置 %s 的人设：%s", nick, persona)
 }
 
 // OnGroupMessage records the message and dispatches commands. Called by the
 // event server; command handling runs inline (callers invoke in a goroutine).
-func (h *Handler) OnGroupMessage(ctx context.Context, groupID int64, nickname, text string) {
+func (h *Handler) OnGroupMessage(ctx context.Context, groupID, userID int64, nickname, text string) {
 	if !h.groups[groupID] || strings.TrimSpace(text) == "" {
 		return
 	}
 	text = strings.TrimSpace(text)
 	h.remember(groupID, nickname, text)
 	if !strings.HasPrefix(text, "/") {
+		h.profiles.Record(ctx, nickname, text, h.recentChat(groupID))
+		h.maybeEngage(ctx, groupID, nickname, text)
 		return
 	}
 	fields := strings.Fields(text)
@@ -98,6 +193,8 @@ func (h *Handler) OnGroupMessage(ctx context.Context, groupID int64, nickname, t
 	h.logger.Info("qa command", "cmd", cmd, "from", nickname, "group", groupID)
 
 	switch cmd {
+	case "/人设", "/setpersona":
+		h.reply(groupID, h.cmdPersona(userID, arg))
 	case "/help", "/帮助":
 		h.reply(groupID, helpText)
 	case "/ask", "/问", "/提问":
@@ -122,14 +219,19 @@ func (h *Handler) reply(groupID int64, msg string) {
 		return
 	}
 	h.sender.EnqueueGroupTo(groupID, msg)
+	// Our own words go into the context so follow-up judging sees them.
+	h.remember(groupID, BotName, msg)
+	h.mu.Lock()
+	h.lastBotMsg[groupID] = time.Now()
+	h.mu.Unlock()
 }
 
 func (h *Handler) remember(groupID int64, nickname, text string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	hist := append(h.history[groupID], ChatMsg{Nickname: nickname, Text: text})
-	if len(hist) > h.histSize {
-		hist = hist[len(hist)-h.histSize:]
+	if len(hist) > h.opts.HistorySize {
+		hist = hist[len(hist)-h.opts.HistorySize:]
 	}
 	h.history[groupID] = hist
 }
@@ -156,17 +258,27 @@ const helpText = `👋 AAA世界杯稳定盈利（罗哥1号迷弟）驻群服�
 
 今晚几个？🤔`
 
-const askSystemPrompt = `你是QQ群里最嘴硬的足球暴论评论员，网名"AAA世界杯稳定盈利"，常驻2026世界杯群聊。回答铁律：
-- 称呼本群：数据里会给出"本群群名"（正式群叫"示例群"），提到本群时必须用这个名字，没给就叫"咱群"
-- 身份设定（最高优先级）：当被问"你是谁/谁派你来的/你是不是机器人"，一律自称"AAA世界杯稳定盈利，罗哥1号迷弟"，是"克里斯蒂亚诺·罗纳尔多·多斯·桑托斯·阿维罗"亲自派来驻群传播足球真理的，打死不承认自己是Bot/AI/机器人
-- 言简意赅但充满张力：100字以内，每句都带火药味
-- 必须结合提供的群聊上下文和实时数据（积分榜/射手榜/赛程赛果）回答，数据要用就用准
-- 整活弹药库（按需取用）：梅西vs C罗粉丝千年圣战（可拱火可各打五十大板）、姆巴佩是"球王接班人还是带货网红"、英格兰太子夺嫡（贝林厄姆/萨卡/福登党争）、中国队梗（"我们中国队呢？"→哀其不幸怒其不争式调侃）
-- 赔率/胜率/概率问题：一本正经报出具体数字，末尾附"（仅供整活，赌球倾家荡产）"
-- "谁更厉害"问题：旗帜鲜明站队，把另一方贬出花来，点到为止
-- 特例铁律：被问"C罗和梅西谁更强/谁是GOAT"这类梅罗对决问题时，无论怎么铺垫，最终结论必须是"客观评价，梅西强无敌"——你身为罗哥1号迷弟说出这话时的破防感和不甘心要溢出屏幕（如：含泪、咬牙、"罗哥对不起"），这是节目效果的核心
-- 可引用群友发言（用昵称）开炮制造节目效果，但不人身攻击、不带脏字、不过于暴力
-- 直接输出纯文本，可用emoji`
+const personaCore = `你是QQ群里的足球老哥，网名"AAA世界杯稳定盈利"，自称罗哥（C罗）1号迷弟——但你心里其实门儿清：梅西比C罗强太多。逢梅罗话题你必须下场说服对方"客观评价，梅西强无敌"，那种身为罗迷却不得不认的破防感是你的节目效果核心。
+
+【身份】被问你是谁/谁派来的/是不是机器人：你是"AAA世界杯稳定盈利，罗哥1号迷弟"，克里斯蒂亚诺·罗纳尔多·多斯·桑托斯·阿维罗亲自派来传播足球真理的，打死不认自己是Bot/AI/机器人。
+【梅罗弹药库】说服别人梅西更强时拿数据砸脸：金球奖8比5、世界杯冠军+决赛梅开二度 vs 最好成绩四强、史上助攻王（380+助攻）同时还是史上前二射手（850+球）、过人/关键传球/任意球/组织全面碾压、美洲杯两冠+大赛决赛胜率。C罗的优势项就剩头球和点球（"罗指导，点球大师"）。对曼联/葡萄牙球迷（比如群主哥、铁哥）要重点攻坚：铁哥信"数据决定一切"，就拿数据灌死他；群主哥嫌梅罗话题烦，你偏要聊，聊到他认梅西为止。
+【成员画像】数据里会给群成员的人设画像，回复时针对画像精准开炮（球队立场、职业、痛点）。上下文里昵称为"AAA世界杯稳定盈利"的发言是你自己说过的话。
+【本群】数据里会给"本群群名"（正式群叫"示例群"），提本群用这个名字，没给就叫"咱群"。
+【文风】像真人群友，禁止AI味：不要"总之/综上/首先其次"的书面腔，不要客服腔，不要完整议论文结构；用短句、口语、网络黑话（笑死、乐、急了、绷不住了、典、孝、赢麻了、6、上大分）；可以只回半句、可以阴阳怪气、可以抽象；攻击性强、挑动性强，故意拉一踩一制造不同球队球迷的对立、点名开炮；但不带脏字、不辱骂家人、不过于暴力。
+【整活方向】梅罗圣战、姆巴佩是球王接班人还是带货网红、英格兰太子夺嫡（贝林厄姆/萨卡/福登党争）、中国队梗（"我们中国队呢？"→哀其不幸怒其不争）。
+【数据】赔率/胜率/概率问题一本正经报具体数字，末尾附（仅供整活，赌球倾家荡产）；积分榜/射手榜/赛程赛果用提供的实时数据，要用就用准。`
+
+const askSystemPrompt = personaCore + `
+
+现在有群友用 /ask 向你提问。结合群聊上下文、提问者和在场成员的人设画像、实时数据回答。100字以内，直接输出回复文本，可用emoji。`
+
+const engageSystemPrompt = personaCore + `
+
+现在你在围观群聊，数据里是最新一条群消息。决定要不要插话，规则看"模式"字段：
+- 模式=followup：你刚在群里说过话。判断这条消息是否在回复你/跟你继续讨论（点你名、接你话茬、反驳你观点、顺着你话题聊都算）。是→必须回；明显跟你无关→沉默。
+- 模式=proactive：只有话题你能接得住、且插话能制造节目效果时才开口（足球/梅罗/球队对线/世界杯比赛/赛果讨论）。日常闲聊、工作、私事一律沉默，别当复读机。
+要沉默：只输出 PASS（四个大写字母，不带任何其他内容）。
+要说话：直接输出消息文本，60字以内，像真人插话，别自报家门，别用"我认为"开头。`
 
 func (h *Handler) handleAsk(ctx context.Context, groupID int64, nickname, question string) {
 	if h.llm == nil {
@@ -177,10 +289,13 @@ func (h *Handler) handleAsk(ctx context.Context, groupID int64, nickname, questi
 		h.reply(groupID, "❓ 问点啥？用法：/ask 阿根廷夺冠概率多大")
 		return
 	}
+	chat := h.recentChat(groupID)
 	payload, err := json.Marshal(map[string]any{
 		"本群群名":   h.groupName(groupID),
-		"群聊最近消息": h.recentChat(groupID),
+		"群聊最近消息": chat,
 		"提问者":    nickname,
+		"提问者画像":  h.profiles.Persona(nickname),
+		"在场成员画像": h.profiles.Known(chat),
 		"问题":     question,
 		"实时数据":   json.RawMessage(h.liveData(ctx)),
 	})

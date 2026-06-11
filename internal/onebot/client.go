@@ -118,6 +118,49 @@ func (c *Client) SendPrivate(userID int64, msg string) error {
 	})
 }
 
+// GroupMembers returns display names (card preferred) of a group's members.
+func (c *Client) GroupMembers(groupID int64) ([]string, error) {
+	raw, err := json.Marshal(map[string]any{"group_id": groupID})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(http.MethodPost, c.baseURL+"/get_group_member_list", bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var r struct {
+		Data []struct {
+			Card     string `json:"card"`
+			Nickname string `json:"nickname"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &r); err != nil {
+		return nil, fmt.Errorf("member list parse: %.200s", body)
+	}
+	names := make([]string, 0, len(r.Data))
+	for _, m := range r.Data {
+		if m.Card != "" {
+			names = append(names, m.Card)
+		} else {
+			names = append(names, m.Nickname)
+		}
+	}
+	return names, nil
+}
+
 // GetStatus reports whether the QQ account behind NapCat is online.
 // An HTTP/transport error means NapCat itself is down.
 func (c *Client) GetStatus() (online bool, err error) {
