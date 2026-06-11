@@ -71,16 +71,12 @@ func (c *Client) Start(ctx context.Context) {
 						}
 					}
 					err := c.sendGroup(msg.groupID, part)
-					if err != nil && strings.Contains(err.Error(), "Timeout") {
-						// QQ-side ack timeouts are usually transient; one
-						// spaced retry recovers most of them.
-						c.logger.Warn("send timed out, retrying once", "group", msg.groupID)
-						select {
-						case <-time.After(5 * time.Second):
-							err = c.sendGroup(msg.groupID, part)
-						case <-ctx.Done():
-							return
-						}
+					if err != nil && strings.Contains(err.Error(), "Timeout: NTEvent") {
+						// NapCat's send ack timing out does NOT mean the
+						// message failed — it is usually already delivered.
+						// Retrying duplicates it; treat as ambiguous success.
+						c.logger.Warn("send ack timed out (likely delivered)", "group", msg.groupID)
+						err = nil
 					}
 					if err != nil {
 						c.logger.Error("send group message failed", "error", err)
