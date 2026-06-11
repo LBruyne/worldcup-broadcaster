@@ -26,12 +26,17 @@ func (h *Handler) maybeEngage(ctx context.Context, groupID int64, nickname, text
 
 	mode := ""
 	switch {
+	case addressesBot(text):
+		mode = "called" // named directly: always evaluate
 	case sinceBot < h.opts.FollowupWindow:
 		mode = "followup"
 	case sinceEngage > h.opts.EngageCooldown && h.randFloat() < h.opts.EngageProb:
 		mode = "proactive"
 	}
 	if mode == "" || busy {
+		if mode != "" {
+			h.logger.Info("engage skipped (busy)", "mode", mode, "group", groupID)
+		}
 		return
 	}
 	h.mu.Lock()
@@ -72,7 +77,7 @@ func (h *Handler) maybeEngage(ctx context.Context, groupID int64, nickname, text
 	}
 	out = strings.TrimSpace(out)
 	if out == "" || strings.HasPrefix(strings.ToUpper(out), "PASS") {
-		h.logger.Debug("engage pass", "mode", mode, "group", groupID)
+		h.logger.Info("engage pass", "mode", mode, "group", groupID, "trigger", nickname)
 		return
 	}
 	h.logger.Info("engaging in conversation", "mode", mode, "group", groupID, "trigger", nickname)
@@ -82,4 +87,15 @@ func (h *Handler) maybeEngage(ctx context.Context, groupID int64, nickname, text
 		h.mu.Unlock()
 	}
 	h.reply(groupID, out)
+}
+
+// addressesBot reports whether a plain message is clearly directed at the
+// bot by name, forcing an evaluation regardless of window or probability.
+func addressesBot(text string) bool {
+	for _, kw := range []string{BotName, "稳定盈利", "AAA", "机器人", "bot", "Bot", "BOT", "暴龙", "罗哥迷弟", "回答上面", "回答一下"} {
+		if strings.Contains(text, kw) {
+			return true
+		}
+	}
+	return false
 }

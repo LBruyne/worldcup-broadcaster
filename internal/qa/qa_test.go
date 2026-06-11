@@ -596,3 +596,19 @@ func TestStyleLearning(t *testing.T) {
 	// persisted across reload (fresh handler over same store would need same
 	// store dir; here just confirm the file exists via styleContext cache)
 }
+
+func TestCalledByNameAlwaysEvaluates(t *testing.T) {
+	llm := &fakeLLM{reply: "叫我干啥，进球了喊我"}
+	h, sender := newHandler(t, llm) // EngageProb=0, no prior bot message
+	h.OnGroupMessage(context.Background(), 861376113, 0, "小明", "机器人 回答一下我刚才的问题")
+	deadlineWait(t, sender, 1)
+	if !strings.Contains(llm.gotUser, "called") {
+		t.Errorf("called mode missing: %.200s", llm.gotUser)
+	}
+}
+
+func TestPoliticsRedlineInPrompts(t *testing.T) {
+	if !strings.Contains(personaCore, "涉政红线") || !strings.Contains(engageSystemPrompt, "called") {
+		t.Error("politics redline / called mode missing from prompts")
+	}
+}
