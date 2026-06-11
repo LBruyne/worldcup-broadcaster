@@ -516,3 +516,11 @@ func (b *blockingLLM) Generate(ctx context.Context, _, _ string) (string, error)
 	}
 	return "迟到的答案", nil
 }
+
+func TestPersonaCoreSafetyRedline(t *testing.T) {
+	for _, want := range []string{"严禁", "身体", "职业"} {
+		if !strings.Contains(personaCore, want) {
+			t.Errorf("persona core missing safety rule %q", want)
+		}
+	}
+}
