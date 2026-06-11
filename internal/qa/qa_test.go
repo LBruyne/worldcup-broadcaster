@@ -527,3 +527,72 @@ func TestPersonaCoreSafetyRedline(t *testing.T) {
 		}
 	}
 }
+
+func TestToneCommand(t *testing.T) {
+	llm := &fakeLLM{reply: "说话更损、表情少用、句子更短"}
+	h, sender := newHandler(t, llm)
+	ctx := context.Background()
+
+	// initial: nothing set
+	h.OnGroupMessage(ctx, 861376113, 0, "小明", "/tone")
+	if got := sender.last(t); !strings.Contains(got, "没有特别的语气设定") {
+		t.Errorf("empty tone = %s", got)
+	}
+	// first set: stored verbatim (no merge needed)
+	h.OnGroupMessage(ctx, 861376113, 0, "小明", "/tone 说话再损一点")
+	if got := sender.last(t); !strings.Contains(got, "说话再损一点") {
+		t.Errorf("tone set = %s", got)
+	}
+	// second set: merged via llm
+	h.OnGroupMessage(ctx, 861376113, 0, "小红", "/tone 少用表情")
+	if got := sender.last(t); !strings.Contains(got, "说话更损") {
+		t.Errorf("tone merge = %s", got)
+	}
+	// reset
+	h.OnGroupMessage(ctx, 861376113, 0, "小明", "/tone 重置")
+	if got := sender.last(t); !strings.Contains(got, "重置") {
+		t.Errorf("tone reset = %s", got)
+	}
+	if _, tone := h.styleContext(861376113); tone != "" {
+		t.Errorf("tone not cleared: %q", tone)
+	}
+}
+
+func TestToneInjectedIntoAsk(t *testing.T) {
+	llm := &fakeLLM{reply: "ok"}
+	h, sender := newHandler(t, llm)
+	ctx := context.Background()
+	h.OnGroupMessage(ctx, 861376113, 0, "小明", "/tone 用文言文说话")
+	h.OnGroupMessage(ctx, 861376113, 0, "小明", "/ask 今晚谁赢")
+	deadlineWait(t, sender, 2)
+	if !strings.Contains(llm.gotUser, "用文言文说话") {
+		t.Errorf("tone missing from ask payload: %.300s", llm.gotUser)
+	}
+	if !strings.Contains(llm.gotSys, "入乡随俗") {
+		t.Error("style mimicry rule missing from persona core")
+	}
+}
+
+func TestStyleLearning(t *testing.T) {
+	llm := &fakeLLM{reply: "句子短平快，爱用典/孝/急了三连"}
+	h, _ := newHandler(t, llm)
+	ctx := context.Background()
+	for i := 0; i < styleRefreshEvery; i++ {
+		h.OnGroupMessage(ctx, 861376113, 0, "灌水机", fmt.Sprintf("水一条%d", i))
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if desc, _ := h.styleContext(861376113); desc != "" {
+			if !strings.Contains(desc, "短平快") {
+				t.Errorf("style = %s", desc)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("style not learned")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// persisted across reload (fresh handler over same store would need same
+	// store dir; here just confirm the file exists via styleContext cache)
+}

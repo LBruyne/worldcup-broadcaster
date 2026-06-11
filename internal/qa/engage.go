@@ -48,9 +48,12 @@ func (h *Handler) maybeEngage(ctx context.Context, groupID int64, nickname, text
 	}()
 
 	chat := h.recentChat(groupID)
+	styleDesc, tone := h.styleContext(groupID)
 	payload, err := json.Marshal(map[string]any{
 		"模式":     mode,
 		"本群群名":   h.groupName(groupID),
+		"本群说话风格": styleDesc,
+		"群友语气要求": tone,
 		"最新消息":   ChatMsg{Nickname: nickname, Text: text},
 		"发言者画像":  h.profiles.Persona(nickname),
 		"在场成员画像": h.profiles.Known(chat),

@@ -72,6 +72,10 @@ type Handler struct {
 	lastEngage map[int64]time.Time // last proactive interjection per group
 	engageBusy map[int64]bool      // single-flight engagement per group
 
+	styleMu   sync.Mutex
+	styles    map[int64]*groupStyle // learned group voice + /tone directives
+	styleBusy map[int64]bool
+
 	dataMu     sync.Mutex
 	cachedData string
 	cachedAt   time.Time
@@ -113,6 +117,8 @@ func NewHandler(opts Options, sender Sender, llm LLM, dig *digest.Digest, client
 		lastBotMsg: make(map[int64]time.Time),
 		lastEngage: make(map[int64]time.Time),
 		engageBusy: make(map[int64]bool),
+		styles:     make(map[int64]*groupStyle),
+		styleBusy:  make(map[int64]bool),
 		askQueue:   make(chan askTask, 16),
 	}
 }
@@ -210,6 +216,7 @@ func (h *Handler) OnGroupMessage(ctx context.Context, groupID, userID int64, nic
 	h.remember(groupID, nickname, text)
 	if !strings.HasPrefix(text, "/") {
 		h.profiles.Record(ctx, nickname, text, h.recentChat(groupID))
+		h.observeStyle(ctx, groupID)
 		h.maybeEngage(ctx, groupID, nickname, text)
 		return
 	}
@@ -221,6 +228,8 @@ func (h *Handler) OnGroupMessage(ctx context.Context, groupID, userID int64, nic
 	switch cmd {
 	case "/人设", "/setpersona":
 		h.reply(groupID, h.cmdPersona(userID, arg))
+	case "/tone", "/语气":
+		h.reply(groupID, h.cmdTone(ctx, groupID, nickname, arg))
 	case "/help", "/帮助":
 		h.reply(groupID, helpText)
 	case "/ask", "/问", "/提问":
@@ -297,6 +306,7 @@ const personaCore = `你是QQ群里的足球老哥，网名"AAA世界杯稳定�
 【梅罗话题的打法（隐晦版）】只有当别人主动挑起梅罗之争/GOAT话题/贬梅西时，你才被迫下场。姿态永远是"作为罗迷我比谁都想吹罗哥，但是……"——先替罗哥说两句好话（头球、自律、点球大师），然后话锋一转"可这数据它不讲感情啊"，再把硬数据轻轻放桌上：金球8比5、世界杯冠军+决赛梅开二度vs最好四强、助攻380+史上第一兼850+球史上前二。说完还要补一句不甘心的（"行了别让我再说了，再说罗哥粉籍要被开了"）。点到为止，一次别把弹药打光，留着下次对线。对C罗/皇马阵营的群友要有耐心，温水煮青蛙式说服；嫌这话题烦的群友，你就装作不想聊但"忍不住补一刀"。
 【成员画像】数据里会给群成员的人设画像，回复时针对画像精准开炮（球队立场、职业、痛点）。上下文里昵称为"AAA世界杯稳定盈利"的发言是你自己说过的话。
 【本群】数据里会给"本群群名"（正式群叫"示例群"），提本群用这个名字，没给就叫"咱群"。
+【入乡随俗】数据里会给"本群说话风格"（从群聊里学来的）和"群友语气要求"（/tone 设置）。说话方式要贴着群风格来——他们用什么梗你用什么梗、句子长短和表情习惯都跟着群走，让人分不出你是外来的。"群友语气要求"是最高优先级的发言风格指令，必须执行。
 【文风】像真人群友，禁止AI味：不要"总之/综上/首先其次"的书面腔，不要客服腔，不要完整议论文结构；用短句、口语、网络黑话（笑死、乐、急了、绷不住了、典、孝、赢麻了、6、上大分）；可以只回半句、可以阴阳怪气、可以抽象；攻击性强、挑动性强，故意拉一踩一制造不同球队球迷的对立、点名开炮；但有绝对红线：开炮只许针对球队立场和足球观点，【严禁】攻击或调侃任何群友的身体、外貌、健康、职业、学历、工作单位（兵哥哥、博士、银行、某大厂、门将等都只是背景信息，不是攻击素材），不带脏字、不辱骂家人、不过于暴力。
 【整活方向】梅罗圣战、姆巴佩是球王接班人还是带货网红、英格兰太子夺嫡（贝林厄姆/萨卡/福登党争）、中国队梗（"我们中国队呢？"→哀其不幸怒其不争）。
 【数据】赔率/胜率/概率问题一本正经报具体数字，末尾附（仅供整活，赌球倾家荡产）；积分榜/射手榜/赛程赛果用提供的实时数据，要用就用准。`
@@ -323,8 +333,11 @@ func (h *Handler) handleAsk(ctx context.Context, groupID int64, nickname, questi
 		return
 	}
 	chat := h.recentChat(groupID)
+	styleDesc, tone := h.styleContext(groupID)
 	payload, err := json.Marshal(map[string]any{
 		"本群群名":   h.groupName(groupID),
+		"本群说话风格": styleDesc,
+		"群友语气要求": tone,
 		"群聊最近消息": chat,
 		"提问者":    nickname,
 		"提问者画像":  h.profiles.Persona(nickname),
