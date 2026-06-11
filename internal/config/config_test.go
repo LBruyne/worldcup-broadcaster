@@ -91,3 +91,23 @@ func TestLoadTooFastPolling(t *testing.T) {
 		t.Fatal("expected error for poll interval < 5s")
 	}
 }
+
+func TestGroupIDsMerge(t *testing.T) {
+	p := writeTemp(t, "onebot:\n  group_ids: [111, 222]\n  group_id: 333\n")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.OneBot.GroupIDs) != 3 || cfg.OneBot.GroupIDs[2] != 333 {
+		t.Errorf("groups = %v", cfg.OneBot.GroupIDs)
+	}
+
+	p2 := writeTemp(t, "onebot:\n  group_ids: [111]\n  group_id: 111\n")
+	cfg2, err := Load(p2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg2.OneBot.GroupIDs) != 1 {
+		t.Errorf("duplicate group merged: %v", cfg2.OneBot.GroupIDs)
+	}
+}

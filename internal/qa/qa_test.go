@@ -22,13 +22,18 @@ import (
 type fakeSender struct {
 	mu   sync.Mutex
 	msgs []string
+	gids []int64
 }
 
-func (f *fakeSender) EnqueueGroup(msg string) {
+func (f *fakeSender) EnqueueGroupTo(gid int64, msg string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.gids = append(f.gids, gid)
 	f.msgs = append(f.msgs, msg)
 }
+
+// EnqueueGroup satisfies digest.Sender (unused in these tests).
+func (f *fakeSender) EnqueueGroup(msg string) { f.EnqueueGroupTo(0, msg) }
 
 func (f *fakeSender) last(t *testing.T) string {
 	t.Helper()
@@ -88,7 +93,7 @@ func newHandler(t *testing.T, llm LLM) (*Handler, *fakeSender) {
 	sender := &fakeSender{}
 	logger := slog.Default()
 	dig := digest.New(client, nil, store.New(t.TempDir()), sender, func(string, string) {}, logger)
-	return NewHandler(861376113, sender, llm, dig, client, 20, logger), sender
+	return NewHandler([]int64{861376113, 1093353838}, sender, llm, dig, client, 20, logger), sender
 }
 
 func TestHelp(t *testing.T) {
@@ -178,7 +183,7 @@ func TestHistoryRing(t *testing.T) {
 	for i := 0; i < 30; i++ {
 		h.OnGroupMessage(context.Background(), 861376113, "灌水机", fmt.Sprintf("msg-%d", i))
 	}
-	hist := h.recentChat()
+	hist := h.recentChat(861376113)
 	if len(hist) != 20 {
 		t.Fatalf("history = %d, want 20", len(hist))
 	}
@@ -216,5 +221,28 @@ func TestServerEndToEnd(t *testing.T) {
 	}
 	if got := sender.last(t); !strings.Contains(got, "/ask") {
 		t.Errorf("help via server wrong:\n%s", got)
+	}
+}
+
+// Per-group isolation: chat context of one group must not leak into the
+// other, and replies must target the origin group.
+func TestPerGroupIsolation(t *testing.T) {
+	llm := &fakeLLM{reply: "ok"}
+	h, sender := newHandler(t, llm)
+	ctx := context.Background()
+	h.OnGroupMessage(ctx, 861376113, "测试群人", "测试群的秘密暗号XYZZY")
+	h.OnGroupMessage(ctx, 1093353838, "正式群人", "正式群只聊球")
+	h.OnGroupMessage(ctx, 1093353838, "正式群人", "/ask 群里刚才聊了啥")
+
+	if strings.Contains(llm.gotUser, "XYZZY") {
+		t.Error("test-group chat leaked into prod-group /ask context")
+	}
+	if !strings.Contains(llm.gotUser, "正式群只聊球") {
+		t.Error("prod-group context missing")
+	}
+	sender.mu.Lock()
+	defer sender.mu.Unlock()
+	if n := len(sender.gids); n == 0 || sender.gids[n-1] != 1093353838 {
+		t.Errorf("reply target = %v, want prod group", sender.gids)
 	}
 }

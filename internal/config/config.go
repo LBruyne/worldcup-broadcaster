@@ -10,14 +10,23 @@ import (
 )
 
 type OneBot struct {
-	BaseURL        string `yaml:"base_url"`
-	AccessToken    string `yaml:"access_token"`
-	GroupID        int64  `yaml:"group_id"`
-	AdminQQ        int64  `yaml:"admin_qq"`
-	SendIntervalMS int    `yaml:"send_interval_ms"`
+	BaseURL     string `yaml:"base_url"`
+	AccessToken string `yaml:"access_token"`
+	// GroupIDs are the QQ groups to broadcast to. The single group_id key
+	// is still accepted and merged for backwards compatibility.
+	GroupIDs       []int64 `yaml:"group_ids"`
+	GroupID        int64   `yaml:"group_id"`
+	AdminQQ        int64   `yaml:"admin_qq"`
+	SendIntervalMS int     `yaml:"send_interval_ms"`
 	// ListenAddr receives NapCat event pushes (group chat commands).
 	// Empty disables the QA feature.
 	ListenAddr string `yaml:"listen_addr"`
+	// KeepaliveIntervalMin is how often the QQ online status is probed.
+	// 0 disables the keepalive.
+	KeepaliveIntervalMin int `yaml:"keepalive_interval_min"`
+	// RestartCmd is executed (via sh -c) when QQ is detected offline,
+	// at most once per 20 minutes.
+	RestartCmd string `yaml:"restart_cmd"`
 }
 
 type QA struct {
@@ -81,9 +90,11 @@ type Config struct {
 func defaults() *Config {
 	return &Config{
 		OneBot: OneBot{
-			BaseURL:        "http://127.0.0.1:3000",
-			SendIntervalMS: 1500,
-			ListenAddr:     "127.0.0.1:3100",
+			BaseURL:              "http://127.0.0.1:3000",
+			SendIntervalMS:       1500,
+			ListenAddr:           "127.0.0.1:3100",
+			KeepaliveIntervalMin: 3,
+			RestartCmd:           "docker restart napcat",
 		},
 		QA: QA{HistorySize: 20},
 		ESPN: ESPN{
@@ -143,6 +154,17 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.OneBot.SendIntervalMS < 0 {
 		return nil, fmt.Errorf("onebot.send_interval_ms must be >= 0")
+	}
+	if cfg.OneBot.GroupID != 0 {
+		found := false
+		for _, g := range cfg.OneBot.GroupIDs {
+			if g == cfg.OneBot.GroupID {
+				found = true
+			}
+		}
+		if !found {
+			cfg.OneBot.GroupIDs = append(cfg.OneBot.GroupIDs, cfg.OneBot.GroupID)
+		}
 	}
 	return cfg, nil
 }

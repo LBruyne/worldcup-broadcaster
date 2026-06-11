@@ -14,32 +14,37 @@ import (
 	"time"
 )
 
+type groupMsg struct {
+	groupID int64
+	text    string
+}
+
 type Client struct {
 	baseURL  string
 	token    string
-	groupID  int64
+	groupIDs []int64
 	interval time.Duration
 	http     *http.Client
 	logger   *slog.Logger
 
-	queue chan string
+	queue chan groupMsg
 	ctx   context.Context // set by Start; bounds in-flight HTTP on shutdown
 	// OnSendError, when set, is invoked for every failed group send so the
 	// alerter can notify the admin.
 	OnSendError func(error)
 }
 
-func New(baseURL, token string, groupID int64, interval time.Duration, logger *slog.Logger) *Client {
+func New(baseURL, token string, groupIDs []int64, interval time.Duration, logger *slog.Logger) *Client {
 	return &Client{
 		baseURL:  baseURL,
 		token:    token,
-		groupID:  groupID,
+		groupIDs: groupIDs,
 		interval: interval,
 		http:     &http.Client{Timeout: 15 * time.Second},
 		logger:   logger,
 		// Sized for a worst-case burst: a restart during several concurrent
 		// live matches can diff hundreds of events at once.
-		queue: make(chan string, 1024),
+		queue: make(chan groupMsg, 1024),
 	}
 }
 
@@ -52,7 +57,7 @@ func (c *Client) Start(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case msg := <-c.queue:
-				if err := c.SendGroupNow(msg); err != nil {
+				if err := c.sendGroup(msg.groupID, msg.text); err != nil {
 					c.logger.Error("send group message failed", "error", err)
 					if c.OnSendError != nil {
 						// Off the consumer goroutine: an alert (private msg
@@ -71,25 +76,32 @@ func (c *Client) Start(ctx context.Context) {
 	}()
 }
 
-// EnqueueGroup queues a group message; drops (with a log) when the queue is
-// saturated rather than blocking match watchers.
+// EnqueueGroup queues a broadcast to every configured group; drops (with a
+// log) when the queue is saturated rather than blocking match watchers.
+// In log-only mode (no groups configured) messages land in the log instead.
 func (c *Client) EnqueueGroup(msg string) {
-	select {
-	case c.queue <- msg:
-	default:
-		c.logger.Error("onebot queue full, dropping message", "message", msg)
+	if len(c.groupIDs) == 0 {
+		c.logger.Warn("no group configured, message logged only", "message", msg)
+		return
+	}
+	for _, gid := range c.groupIDs {
+		c.EnqueueGroupTo(gid, msg)
 	}
 }
 
-// SendGroupNow posts the message immediately, bypassing the queue.
-// In log-only mode (group_id == 0) the message lands in the log instead.
-func (c *Client) SendGroupNow(msg string) error {
-	if c.groupID == 0 {
-		c.logger.Warn("group_id not configured, message logged only", "message", msg)
-		return nil
+// EnqueueGroupTo queues a message for one specific group (QA replies go
+// only to the group the command came from).
+func (c *Client) EnqueueGroupTo(groupID int64, msg string) {
+	select {
+	case c.queue <- groupMsg{groupID, msg}:
+	default:
+		c.logger.Error("onebot queue full, dropping message", "group", groupID, "message", msg)
 	}
+}
+
+func (c *Client) sendGroup(groupID int64, msg string) error {
 	return c.call("/send_group_msg", map[string]any{
-		"group_id": c.groupID,
+		"group_id": groupID,
 		"message":  msg,
 	})
 }
@@ -104,6 +116,43 @@ func (c *Client) SendPrivate(userID int64, msg string) error {
 		"user_id": userID,
 		"message": msg,
 	})
+}
+
+// GetStatus reports whether the QQ account behind NapCat is online.
+// An HTTP/transport error means NapCat itself is down.
+func (c *Client) GetStatus() (online bool, err error) {
+	raw, err := json.Marshal(map[string]any{})
+	if err != nil {
+		return false, err
+	}
+	req, err := http.NewRequest(http.MethodPost, c.baseURL+"/get_status", bytes.NewReader(raw))
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("get_status: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false, err
+	}
+	var r struct {
+		Status string `json:"status"`
+		Data   struct {
+			Online bool `json:"online"`
+			Good   bool `json:"good"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &r); err != nil {
+		return false, fmt.Errorf("get_status parse: %q", body)
+	}
+	return r.Data.Online, nil
 }
 
 // WaitIdle blocks until the send queue drains (plus one interval for the

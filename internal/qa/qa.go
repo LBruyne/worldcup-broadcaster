@@ -17,7 +17,7 @@ import (
 )
 
 type Sender interface {
-	EnqueueGroup(msg string)
+	EnqueueGroupTo(groupID int64, msg string)
 }
 
 type LLM interface {
@@ -30,7 +30,7 @@ type ChatMsg struct {
 }
 
 type Handler struct {
-	groupID  int64
+	groups   map[int64]bool
 	sender   Sender
 	llm      LLM
 	dig      *digest.Digest
@@ -39,79 +39,85 @@ type Handler struct {
 	histSize int
 
 	mu      sync.Mutex
-	history []ChatMsg
+	history map[int64][]ChatMsg // per-group rolling chat context
 
 	dataMu     sync.Mutex
 	cachedData string
 	cachedAt   time.Time
 }
 
-func NewHandler(groupID int64, sender Sender, llm LLM, dig *digest.Digest, client *espn.Client, histSize int, logger *slog.Logger) *Handler {
+func NewHandler(groupIDs []int64, sender Sender, llm LLM, dig *digest.Digest, client *espn.Client, histSize int, logger *slog.Logger) *Handler {
 	if histSize <= 0 {
 		histSize = 20
 	}
+	groups := make(map[int64]bool, len(groupIDs))
+	for _, g := range groupIDs {
+		groups[g] = true
+	}
 	return &Handler{
-		groupID: groupID, sender: sender, llm: llm, dig: dig, espn: client,
+		groups: groups, sender: sender, llm: llm, dig: dig, espn: client,
 		histSize: histSize, logger: logger,
+		history: make(map[int64][]ChatMsg),
 	}
 }
 
 // OnGroupMessage records the message and dispatches commands. Called by the
 // event server; command handling runs inline (callers invoke in a goroutine).
 func (h *Handler) OnGroupMessage(ctx context.Context, groupID int64, nickname, text string) {
-	if groupID != h.groupID || strings.TrimSpace(text) == "" {
+	if !h.groups[groupID] || strings.TrimSpace(text) == "" {
 		return
 	}
 	text = strings.TrimSpace(text)
-	h.remember(nickname, text)
+	h.remember(groupID, nickname, text)
 	if !strings.HasPrefix(text, "/") {
 		return
 	}
 	fields := strings.Fields(text)
 	cmd := fields[0]
 	arg := strings.TrimSpace(strings.TrimPrefix(text, cmd))
-	h.logger.Info("qa command", "cmd", cmd, "from", nickname)
+	h.logger.Info("qa command", "cmd", cmd, "from", nickname, "group", groupID)
 
 	switch cmd {
 	case "/help", "/帮助":
-		h.sender.EnqueueGroup(helpText)
+		h.reply(groupID, helpText)
 	case "/ask", "/问", "/提问":
-		h.handleAsk(ctx, nickname, arg)
+		h.handleAsk(ctx, groupID, nickname, arg)
 	case "/赛果", "/results", "/result":
-		h.reply(h.cmdResults(ctx))
+		h.reply(groupID, h.cmdResults(ctx))
 	case "/积分榜", "/table", "/积分":
-		h.reply(h.cmdStandings(ctx, arg))
+		h.reply(groupID, h.cmdStandings(ctx, arg))
 	case "/射手榜", "/scorers":
-		h.reply(h.cmdBoard(ctx, true))
+		h.reply(groupID, h.cmdBoard(ctx, true))
 	case "/助攻榜", "/assists":
-		h.reply(h.cmdBoard(ctx, false))
+		h.reply(groupID, h.cmdBoard(ctx, false))
 	case "/晋级", "/ko", "/淘汰赛":
-		h.reply(h.cmdKnockout(ctx))
+		h.reply(groupID, h.cmdKnockout(ctx))
 	default:
 		// unknown slash command: stay silent to avoid being annoying
 	}
 }
 
-func (h *Handler) reply(msg string) {
+func (h *Handler) reply(groupID int64, msg string) {
 	if strings.TrimSpace(msg) == "" {
 		return
 	}
-	h.sender.EnqueueGroup(msg)
+	h.sender.EnqueueGroupTo(groupID, msg)
 }
 
-func (h *Handler) remember(nickname, text string) {
+func (h *Handler) remember(groupID int64, nickname, text string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.history = append(h.history, ChatMsg{Nickname: nickname, Text: text})
-	if len(h.history) > h.histSize {
-		h.history = h.history[len(h.history)-h.histSize:]
+	hist := append(h.history[groupID], ChatMsg{Nickname: nickname, Text: text})
+	if len(hist) > h.histSize {
+		hist = hist[len(hist)-h.histSize:]
 	}
+	h.history[groupID] = hist
 }
 
-func (h *Handler) recentChat() []ChatMsg {
+func (h *Handler) recentChat(groupID int64) []ChatMsg {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return append([]ChatMsg(nil), h.history...)
+	return append([]ChatMsg(nil), h.history[groupID]...)
 }
 
 const helpText = `👋 AAA世界杯稳定盈利（罗哥1号迷弟）驻群服务！
@@ -141,17 +147,17 @@ const askSystemPrompt = `你是QQ群里最嘴硬的足球暴论评论员，网�
 - 可引用群友发言（用昵称）开炮制造节目效果，但不人身攻击、不带脏字、不过于暴力
 - 直接输出纯文本，可用emoji`
 
-func (h *Handler) handleAsk(ctx context.Context, nickname, question string) {
+func (h *Handler) handleAsk(ctx context.Context, groupID int64, nickname, question string) {
 	if h.llm == nil {
-		h.reply("🤖 LLM 没配置，暴龙机暂时失声（联系管理员充值/填key）")
+		h.reply(groupID, "🤖 LLM 没配置，暴龙机暂时失声（联系管理员充值/填key）")
 		return
 	}
 	if question == "" {
-		h.reply("❓ 问点啥？用法：/ask 阿根廷夺冠概率多大")
+		h.reply(groupID, "❓ 问点啥？用法：/ask 阿根廷夺冠概率多大")
 		return
 	}
 	payload, err := json.Marshal(map[string]any{
-		"群聊最近消息": h.recentChat(),
+		"群聊最近消息": h.recentChat(groupID),
 		"提问者":    nickname,
 		"问题":     question,
 		"实时数据":   json.RawMessage(h.liveData(ctx)),
@@ -164,10 +170,10 @@ func (h *Handler) handleAsk(ctx context.Context, nickname, question string) {
 	out, err := h.llm.Generate(cctx, askSystemPrompt, string(payload))
 	if err != nil {
 		h.logger.Error("ask llm failed", "error", err)
-		h.reply("🤖 暴龙机过载冒烟了，稍后再问（LLM调用失败）")
+		h.reply(groupID, "🤖 暴龙机过载冒烟了，稍后再问（LLM调用失败）")
 		return
 	}
-	h.reply(strings.TrimSpace(out))
+	h.reply(groupID, strings.TrimSpace(out))
 }
 
 // liveData returns a compact JSON blob of standings + boards + today's

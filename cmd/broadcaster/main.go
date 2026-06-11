@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sync"
@@ -36,6 +37,7 @@ func main() {
 	runRecap := flag.Bool("run-recap-now", false, "send today's recap immediately and exit")
 	dateOverride := flag.String("date", "", "China date (2006-01-02) override for manual runs")
 	simFixture := flag.String("simulate-fixture", "", "replay a summary fixture's events to the group and exit (live-flow drill)")
+	testAlert := flag.Bool("test-alert", false, "send a test alert to admin_qq and exit")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
@@ -46,10 +48,10 @@ func main() {
 
 	logger := setupLogger(cfg)
 	logger.Info("worldcup broadcaster starting",
-		"league", cfg.ESPN.League, "group", cfg.OneBot.GroupID,
+		"league", cfg.ESPN.League, "groups", cfg.OneBot.GroupIDs,
 		"poll_interval_sec", cfg.ESPN.PollIntervalSec)
-	if cfg.OneBot.GroupID == 0 {
-		logger.Warn("onebot.group_id is 0: messages will be logged, not sent")
+	if len(cfg.OneBot.GroupIDs) == 0 {
+		logger.Warn("no group configured: messages will be logged, not sent")
 	}
 	if cfg.LLM.APIKey == "" {
 		logger.Warn("llm api key missing: previews/recaps will degrade to data-only")
@@ -60,7 +62,7 @@ func main() {
 
 	st := store.New(cfg.DataDir)
 	espnClient := espn.NewClient(cfg.ESPN.League)
-	bot := onebot.New(cfg.OneBot.BaseURL, cfg.OneBot.AccessToken, cfg.OneBot.GroupID,
+	bot := onebot.New(cfg.OneBot.BaseURL, cfg.OneBot.AccessToken, cfg.OneBot.GroupIDs,
 		time.Duration(cfg.OneBot.SendIntervalMS)*time.Millisecond, logger)
 	alerter := alert.New(bot, cfg.OneBot.AdminQQ, logger)
 	bot.OnSendError = func(err error) { alerter.Alert("onebot", "QQ消息发送失败: "+err.Error()) }
@@ -78,6 +80,12 @@ func main() {
 	loc := cfg.Location
 	today := func() string { return time.Now().In(loc).Format("2006-01-02") }
 	tomorrow := func() string { return time.Now().In(loc).AddDate(0, 0, 1).Format("2006-01-02") }
+
+	// One-shot alert-path test: verifies admin private-message delivery.
+	if *testAlert {
+		alerter.Alert("test", "这是一条测试告警：如果你在QQ私聊里看到它，说明告警链路畅通 ✅")
+		return
+	}
 
 	// One-shot live-broadcast drill: replay all events of a recorded match
 	// through the real formatting/queue/NapCat chain.
@@ -119,13 +127,17 @@ func main() {
 		if llmClient != nil {
 			qaLLM = llmClient
 		}
-		qaHandler := qa.NewHandler(cfg.OneBot.GroupID, bot, qaLLM, dig, espnClient, cfg.QA.HistorySize, logger)
+		qaHandler := qa.NewHandler(cfg.OneBot.GroupIDs, bot, qaLLM, dig, espnClient, cfg.QA.HistorySize, logger)
 		go func() {
 			if err := qa.StartServer(ctx, cfg.OneBot.ListenAddr, qaHandler, logger); err != nil {
 				logger.Error("qa server failed", "error", err)
 				alerter.Alert("qa", "群命令监听服务启动失败: "+err.Error())
 			}
 		}()
+	}
+
+	if cfg.OneBot.KeepaliveIntervalMin > 0 {
+		go qqKeepalive(ctx, cfg, bot, alerter, logger)
 	}
 
 	sched := newMatchScheduler(w, espnClient, alerter, logger)
@@ -152,6 +164,48 @@ func main() {
 	<-c.Stop().Done()
 }
 
+// qqKeepalive probes NapCat's online status and self-heals: on failure it
+// alerts the admin (best-effort) and runs the restart command, at most once
+// per 20 minutes.
+func qqKeepalive(ctx context.Context, cfg *config.Config, bot *onebot.Client, alerter *alert.Alerter, logger *slog.Logger) {
+	interval := time.Duration(cfg.OneBot.KeepaliveIntervalMin) * time.Minute
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	var lastRestart time.Time
+	consecutive := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		online, err := bot.GetStatus()
+		if err == nil && online {
+			if consecutive > 0 {
+				logger.Info("qq back online", "after_failures", consecutive)
+			}
+			consecutive = 0
+			continue
+		}
+		consecutive++
+		logger.Error("qq offline or napcat unreachable", "error", err, "online", online, "consecutive", consecutive)
+		if consecutive < 2 {
+			continue // a single blip (e.g. napcat restarting) is not an outage
+		}
+		alerter.Alert("qq-online", fmt.Sprintf("QQ疑似掉线（连续%d次探测失败，err=%v），尝试自动重启 NapCat", consecutive, err))
+		if cfg.OneBot.RestartCmd != "" && time.Since(lastRestart) > 20*time.Minute {
+			lastRestart = time.Now()
+			logger.Warn("executing restart command", "cmd", cfg.OneBot.RestartCmd)
+			out, cmdErr := exec.CommandContext(ctx, "sh", "-c", cfg.OneBot.RestartCmd).CombinedOutput()
+			if cmdErr != nil {
+				logger.Error("restart command failed", "error", cmdErr, "output", string(out))
+			} else {
+				logger.Info("restart command executed", "output", string(out))
+			}
+		}
+	}
+}
+
 // simulateFixture replays every event of a recorded match summary through
 // the real render + queue + OneBot chain, for verifying the live pipeline
 // end-to-end against the actual QQ group.
@@ -165,16 +219,21 @@ func simulateFixture(ctx context.Context, path string, cfg *config.Config, bot *
 		return fmt.Errorf("parse fixture: %w", err)
 	}
 	events := watcher.Diff(&sum, func(string) bool { return false })
-	logger.Info("simulation starting", "fixture", path, "events", len(events))
-	bot.EnqueueGroup("🧪 [演习] 实时播报链路测试开始：重放2022世界杯决赛全场事件流")
+	if len(cfg.OneBot.GroupIDs) == 0 {
+		return fmt.Errorf("no group configured")
+	}
+	// Drills only ever hit the first configured group (the test group).
+	gid := cfg.OneBot.GroupIDs[0]
+	logger.Info("simulation starting", "fixture", path, "events", len(events), "group", gid)
+	bot.EnqueueGroupTo(gid, "🧪 [演习] 实时播报链路测试开始：重放2022世界杯决赛全场事件流")
 	sent := 0
 	for _, e := range events {
 		if watcher.Enabled(e.Type, cfg.Events) {
-			bot.EnqueueGroup(watcher.Render(e))
+			bot.EnqueueGroupTo(gid, watcher.Render(e))
 			sent++
 		}
 	}
-	bot.EnqueueGroup(fmt.Sprintf("🧪 [演习] 重放完毕，共 %d 条事件消息。实战今晚见！", sent))
+	bot.EnqueueGroupTo(gid, fmt.Sprintf("🧪 [演习] 重放完毕，共 %d 条事件消息。实战今晚见！", sent))
 	logger.Info("simulation enqueued", "messages", sent)
 	return nil
 }

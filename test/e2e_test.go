@@ -137,7 +137,7 @@ log:
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	bot := onebot.New(cfg.OneBot.BaseURL, cfg.OneBot.AccessToken, cfg.OneBot.GroupID,
+	bot := onebot.New(cfg.OneBot.BaseURL, cfg.OneBot.AccessToken, cfg.OneBot.GroupIDs,
 		time.Duration(cfg.OneBot.SendIntervalMS)*time.Millisecond, logger)
 	bot.Start(ctx)
 	st := store.New(cfg.DataDir)
@@ -176,7 +176,7 @@ func TestFullChainLiveMatch(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	bot := onebot.New(nap.srv.URL, "tok123", 654321, time.Millisecond, logger)
+	bot := onebot.New(nap.srv.URL, "tok123", []int64{654321}, time.Millisecond, logger)
 	bot.Start(ctx)
 	dir := t.TempDir()
 

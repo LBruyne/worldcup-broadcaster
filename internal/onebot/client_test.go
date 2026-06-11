@@ -42,9 +42,9 @@ func fakeNapCat(t *testing.T, fail bool) (*httptest.Server, *[]recorded, *sync.M
 
 func TestSendGroupNow(t *testing.T) {
 	srv, recs, mu := fakeNapCat(t, false)
-	c := New(srv.URL, "secret-token", 794925183, time.Millisecond, slog.Default())
-	if err := c.SendGroupNow("⚽ test"); err != nil {
-		t.Fatalf("SendGroupNow: %v", err)
+	c := New(srv.URL, "secret-token", []int64{794925183}, time.Millisecond, slog.Default())
+	if err := c.sendGroup(794925183, "⚽ test"); err != nil {
+		t.Fatalf("sendGroup: %v", err)
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -63,7 +63,7 @@ func TestSendGroupNow(t *testing.T) {
 func TestQueueSerialWithInterval(t *testing.T) {
 	srv, recs, mu := fakeNapCat(t, false)
 	interval := 50 * time.Millisecond
-	c := New(srv.URL, "", 123, interval, slog.Default())
+	c := New(srv.URL, "", []int64{123}, interval, slog.Default())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	c.Start(ctx)
@@ -100,7 +100,7 @@ func TestQueueSerialWithInterval(t *testing.T) {
 
 func TestSendErrorReported(t *testing.T) {
 	srv, _, _ := fakeNapCat(t, true)
-	c := New(srv.URL, "", 123, time.Millisecond, slog.Default())
+	c := New(srv.URL, "", []int64{123}, time.Millisecond, slog.Default())
 	var gotErr error
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -116,15 +116,16 @@ func TestSendErrorReported(t *testing.T) {
 }
 
 func TestLogOnlyModeWithoutGroup(t *testing.T) {
-	c := New("http://127.0.0.1:1", "", 0, time.Millisecond, slog.Default())
-	if err := c.SendGroupNow("no group configured"); err != nil {
-		t.Fatalf("log-only mode should not error: %v", err)
+	c := New("http://127.0.0.1:1", "", nil, time.Millisecond, slog.Default())
+	c.EnqueueGroup("no group configured") // must not panic or enqueue
+	if len(c.queue) != 0 {
+		t.Fatal("log-only mode must not enqueue")
 	}
 }
 
 func TestSendPrivate(t *testing.T) {
 	srv, recs, mu := fakeNapCat(t, false)
-	c := New(srv.URL, "", 123, time.Millisecond, slog.Default())
+	c := New(srv.URL, "", []int64{123}, time.Millisecond, slog.Default())
 	if err := c.SendPrivate(10001, "alert!"); err != nil {
 		t.Fatal(err)
 	}
@@ -133,5 +134,25 @@ func TestSendPrivate(t *testing.T) {
 	r := (*recs)[0]
 	if r.path != "/send_private_msg" || r.body["user_id"].(float64) != 10001 {
 		t.Errorf("private call = %+v", r)
+	}
+}
+
+func TestGetStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/get_status" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		w.Write([]byte(`{"status":"ok","retcode":0,"data":{"online":true,"good":true}}`))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "", []int64{1}, time.Millisecond, slog.Default())
+	online, err := c.GetStatus()
+	if err != nil || !online {
+		t.Fatalf("online=%v err=%v", online, err)
+	}
+
+	down := New("http://127.0.0.1:1", "", []int64{1}, time.Millisecond, slog.Default())
+	if _, err := down.GetStatus(); err == nil {
+		t.Fatal("expected error when napcat unreachable")
 	}
 }
