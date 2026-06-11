@@ -5,7 +5,6 @@ package digest
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -145,79 +144,4 @@ func h2hLine(games []espn.H2HTeam) string {
 		}
 	}
 	return fmt.Sprintf("🔁 近%d次交锋：%s %d胜%d平%d负", len(t.Events), cnmap.Name(t.Team.DisplayName), w, dr, l)
-}
-
-// standingsBlock renders a compact group table from the summary's raw
-// standings JSON. Returns "" when there is no meaningful data yet.
-func standingsBlock(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
-	}
-	var doc struct {
-		Groups []struct {
-			Standings struct {
-				Entries []struct {
-					Team  string `json:"team"`
-					Stats []struct {
-						Name         string `json:"name"`
-						DisplayValue string `json:"displayValue"`
-					} `json:"stats"`
-				} `json:"entries"`
-			} `json:"standings"`
-		} `json:"groups"`
-	}
-	if err := json.Unmarshal(raw, &doc); err != nil || len(doc.Groups) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	for _, g := range doc.Groups {
-		if len(g.Standings.Entries) == 0 {
-			continue
-		}
-		played := false
-		type row struct {
-			rank                   int
-			team, pts, w, t, l, gd string
-		}
-		rows := make([]row, 0, len(g.Standings.Entries))
-		for _, e := range g.Standings.Entries {
-			r := row{team: cnmap.Name(e.Team)}
-			for _, s := range e.Stats {
-				switch s.Name {
-				case "rank":
-					fmt.Sscanf(s.DisplayValue, "%d", &r.rank)
-				case "points":
-					r.pts = s.DisplayValue
-				case "wins":
-					r.w = s.DisplayValue
-				case "ties":
-					r.t = s.DisplayValue
-				case "losses":
-					r.l = s.DisplayValue
-				case "pointDifferential":
-					r.gd = s.DisplayValue
-				case "gamesPlayed":
-					if s.DisplayValue != "0" {
-						played = true
-					}
-				}
-			}
-			rows = append(rows, r)
-		}
-		if !played {
-			continue // matchday 1: an all-zero table is noise
-		}
-		for i := 0; i < len(rows); i++ {
-			for j := i + 1; j < len(rows); j++ {
-				if rows[j].rank < rows[i].rank {
-					rows[i], rows[j] = rows[j], rows[i]
-				}
-			}
-		}
-		b.WriteString("📊 小组积分榜：\n")
-		for _, r := range rows {
-			fmt.Fprintf(&b, "%d. %s %s分（%s胜%s平%s负，净胜%s）\n", r.rank, r.team, r.pts, r.w, r.t, r.l, r.gd)
-		}
-	}
-	return strings.TrimRight(b.String(), "\n")
 }

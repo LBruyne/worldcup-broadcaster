@@ -26,9 +26,11 @@ type previewMatch struct {
 }
 
 const previewSystemPrompt = `你是一位风趣幽默的中文足球解说员，擅长用活泼带梗的语言点评世界杯。` +
-	`用户会给你明日世界杯赛程的JSON数据。请为每场比赛写2-3句"看点"分析（聚焦出线形势、` +
-	`恩怨情仇、球星对决、冷门可能），每场以"🔸 队名 vs 队名"开头，最后用一句话给整个比赛日总评。` +
-	`直接输出纯文本，不要markdown标题，不要重复赛程时间等已知信息，总长度控制在500字以内。`
+	`用户会给你明日世界杯赛程的JSON数据（含完整积分榜和射手/助攻榜）。请为每场比赛写2-3句"看点"分析` +
+	`（聚焦出线/晋级形势、恩怨情仇、球星对决、冷门可能），每场以"🔸 队名 vs 队名"开头。` +
+	`2026世界杯规则：48队12组，每组前2名直接晋级32强，12个小组第三中成绩最好的8个也晋级。` +
+	`请结合积分榜数据明确指出：谁赢了就基本出线、谁输了就悬、是否有提前晋级/出局的生死战。` +
+	`最后用一句话给整个比赛日总评。直接输出纯文本，不要markdown标题，不要重复赛程时间等已知信息，总长度控制在600字以内。`
 
 // Preview fetches the schedule for the given China date (normally D+1),
 // persists data, generates LLM highlights, and broadcasts the digest.
@@ -80,13 +82,65 @@ func (d *Digest) Preview(ctx context.Context, date string) error {
 		d.logger.Error("persist schedule failed", "error", err)
 	}
 
+	standings, boards := d.tablesAndBoards(ctx, date)
+
 	text := d.renderPreview(date, events, matches)
-	if highlights := d.previewHighlights(ctx, date, matches); highlights != "" {
+	teams := map[string]bool{}
+	for _, pm := range matches {
+		teams[pm.Home], teams[pm.Away] = true, true
+	}
+	if section := renderStandingsSection(standings, teams); section != "" {
+		text += blockSep + section
+	}
+	if section := renderBoards(boards); section != "" {
+		text += blockSep + section
+	}
+	if highlights := d.previewHighlights(ctx, date, matches, standings, boards); highlights != "" {
 		text += blockSep + "⭐ 明日看点（DeepSeek 锐评版）\n" + highlights
 	}
 	d.sendSplit(text)
 	d.logger.Info("preview broadcast", "date", date, "matches", len(matches))
 	return nil
+}
+
+// tablesAndBoards fetches full standings and leaderboards, best-effort: a
+// failure of either only drops its section.
+func (d *Digest) tablesAndBoards(ctx context.Context, date string) ([]espn.GroupStanding, *Boards) {
+	standings, err := d.espn.FullStandings(ctx)
+	if err != nil {
+		d.logger.Error("full standings fetch failed", "error", err)
+	} else if err := d.store.SaveJSON(date, "standings", standings); err != nil {
+		d.logger.Error("persist standings failed", "error", err)
+	}
+	boards, err := d.Leaderboards(ctx)
+	if err != nil {
+		d.logger.Error("leaderboards build failed", "error", err)
+	} else if err := d.store.SaveJSON(date, "leaderboards", boards); err != nil {
+		d.logger.Error("persist leaderboards failed", "error", err)
+	}
+	return standings, boards
+}
+
+// renderStandingsSection renders the group tables involving the given teams
+// (group stage only; empty during knockout rounds or before data exists).
+func renderStandingsSection(all []espn.GroupStanding, teams map[string]bool) string {
+	groups := relevantGroups(all, teams)
+	played := false
+	for _, g := range groups {
+		for _, e := range g.Entries {
+			if e.Played > 0 {
+				played = true
+			}
+		}
+	}
+	if !played {
+		return "" // all-zero tables before the first whistle are noise
+	}
+	parts := make([]string, 0, len(groups))
+	for _, g := range groups {
+		parts = append(parts, renderGroupTable(g))
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 func (d *Digest) renderPreview(date string, events []espn.Event, matches []previewMatch) string {
@@ -109,9 +163,6 @@ func (d *Digest) renderPreview(date string, events []espn.Event, matches []previ
 		}
 		if line := h2hLine(h2hTeams); line != "" {
 			b.WriteString("\n" + line)
-		}
-		if tbl := standingsBlock(pm.Standings); tbl != "" {
-			b.WriteString("\n" + tbl)
 		}
 	}
 	return b.String()
@@ -138,11 +189,14 @@ func formCN(form string) string {
 	return b.String()
 }
 
-func (d *Digest) previewHighlights(ctx context.Context, date string, matches []previewMatch) string {
+func (d *Digest) previewHighlights(ctx context.Context, date string, matches []previewMatch, standings []espn.GroupStanding, boards *Boards) string {
 	if d.llm == nil {
 		return ""
 	}
-	payload, err := json.MarshalIndent(map[string]any{"date": date, "matches": matches}, "", " ")
+	payload, err := json.MarshalIndent(map[string]any{
+		"date": date, "matches": matches,
+		"all_group_standings": standings, "leaderboards": boards,
+	}, "", " ")
 	if err != nil {
 		return ""
 	}

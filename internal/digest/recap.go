@@ -35,9 +35,11 @@ type recapMatch struct {
 	Standings json.RawMessage `json:"group_standings,omitempty"`
 }
 
-const recapSystemPrompt = `你是一位风趣幽默的中文足球解说员。用户会给你今日世界杯已结束比赛的JSON战报。` +
-	`请写一段100-200字的整体锐评：点出最大冷门/最精彩比赛/出线形势变化，语言活泼带梗，可以玩"今晚几个"等足球圈梗。` +
-	`直接输出纯文本，不要markdown。`
+const recapSystemPrompt = `你是一位风趣幽默的中文足球解说员。用户会给你今日世界杯已结束比赛的JSON战报` +
+	`（含完整积分榜和射手/助攻榜）。请写一段150-250字的整体锐评：点出最大冷门/最精彩比赛，` +
+	`并结合积分榜明确说出出线形势变化（谁基本稳了、谁命悬一线、谁提前回家）。` +
+	`2026世界杯规则：48队12组，每组前2直接晋级32强，8个成绩最好的小组第三也晋级。` +
+	`语言活泼带梗，可以玩"今晚几个"等足球圈梗。直接输出纯文本，不要markdown。`
 
 // Recap summarizes all matches kicked off on the given China date
 // (normally today: the matches that finished this morning).
@@ -77,8 +79,20 @@ func (d *Digest) Recap(ctx context.Context, date string) error {
 		d.logger.Error("persist recap failed", "error", err)
 	}
 
+	standings, boards := d.tablesAndBoards(ctx, date)
+
 	text := d.renderRecap(date, matches)
-	if comment := d.recapComment(ctx, date, matches); comment != "" {
+	teams := map[string]bool{}
+	for _, rm := range matches {
+		teams[rm.Home], teams[rm.Away] = true, true
+	}
+	if section := renderStandingsSection(standings, teams); section != "" {
+		text += blockSep + section
+	}
+	if section := renderBoards(boards); section != "" {
+		text += blockSep + section
+	}
+	if comment := d.recapComment(ctx, date, matches, standings, boards); comment != "" {
 		text += blockSep + "🎙️ 今日锐评（DeepSeek 说的，跟我无关）\n" + comment
 	}
 	d.sendSplit(text)
@@ -126,7 +140,6 @@ func fillRecapDetails(rm *recapMatch, sum *espn.Summary) {
 func (d *Digest) renderRecap(date string, matches []recapMatch) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "☀️ 下午好！%s 的战报新鲜出炉～\n🏆 2026世界杯 当日赛果（%d场）", displayDate(date), len(matches))
-	seenStandings := map[string]bool{}
 	for _, rm := range matches {
 		b.WriteString(blockSep)
 		score := fmt.Sprintf("%s %s : %s %s", cnmap.Full(rm.Home), rm.HomeScore, rm.AwayScore, cnmap.Name(rm.Away)+cnmap.Flag(rm.Away))
@@ -156,15 +169,11 @@ func (d *Digest) renderRecap(date string, matches []recapMatch) string {
 		for _, rc := range rm.RedCards {
 			fmt.Fprintf(&b, "\n🟥 %s", rc)
 		}
-		if tbl := standingsBlock(rm.Standings); tbl != "" && !seenStandings[tbl] {
-			seenStandings[tbl] = true
-			b.WriteString("\n" + tbl)
-		}
 	}
 	return b.String()
 }
 
-func (d *Digest) recapComment(ctx context.Context, date string, matches []recapMatch) string {
+func (d *Digest) recapComment(ctx context.Context, date string, matches []recapMatch, standings []espn.GroupStanding, boards *Boards) string {
 	if d.llm == nil {
 		return ""
 	}
@@ -177,7 +186,10 @@ func (d *Digest) recapComment(ctx context.Context, date string, matches []recapM
 	if finished == 0 {
 		return ""
 	}
-	payload, err := json.MarshalIndent(map[string]any{"date": date, "matches": matches}, "", " ")
+	payload, err := json.MarshalIndent(map[string]any{
+		"date": date, "matches": matches,
+		"all_group_standings": standings, "leaderboards": boards,
+	}, "", " ")
 	if err != nil {
 		return ""
 	}
