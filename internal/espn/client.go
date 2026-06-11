@@ -12,23 +12,27 @@ import (
 const userAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 
 type Client struct {
-	baseURL string // overridable for tests
-	league  string
-	http    *http.Client
+	baseURL    string // overridable for tests
+	league     string
+	http       *http.Client
+	retryDelay time.Duration
 }
 
 func NewClient(league string) *Client {
 	return &Client{
-		baseURL: "https://site.api.espn.com/apis/site/v2/sports/soccer",
-		league:  league,
-		http:    &http.Client{Timeout: 10 * time.Second},
+		baseURL:    "https://site.api.espn.com/apis/site/v2/sports/soccer",
+		league:     league,
+		http:       &http.Client{Timeout: 10 * time.Second},
+		retryDelay: time.Second,
 	}
 }
 
-// NewClientWithBase is used by tests to point at a fake server.
+// NewClientWithBase is used by tests to point at a fake server; retry
+// backoff is shortened so failure paths stay fast.
 func NewClientWithBase(baseURL, league string) *Client {
 	c := NewClient(league)
 	c.baseURL = baseURL
+	c.retryDelay = 2 * time.Millisecond
 	return c
 }
 
@@ -38,7 +42,7 @@ func (c *Client) get(ctx context.Context, url string) ([]byte, error) {
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
 			select {
-			case <-time.After(time.Duration(attempt) * time.Second):
+			case <-time.After(time.Duration(attempt) * c.retryDelay):
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			}

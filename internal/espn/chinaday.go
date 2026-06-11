@@ -8,6 +8,11 @@ import (
 
 var cst = time.FixedZone("CST", 8*3600)
 
+// ChinaDate formats t as the China calendar date "2006-01-02".
+func ChinaDate(t time.Time) string {
+	return t.In(cst).Format("2006-01-02")
+}
+
 // FilterChinaDate returns the events whose kickoff falls on the given China
 // calendar date. date must be "2006-01-02" formatted.
 func FilterChinaDate(events []Event, date string) ([]Event, error) {
