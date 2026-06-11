@@ -1,0 +1,65 @@
+# 2026 世界杯 QQ 群播报 Bot 配置
+# 标 ←必填 的项需要你填写，其余保持默认即可。
+
+onebot:
+  base_url: "http://127.0.0.1:3000"   # NapCat 的 OneBot HTTP 地址（deploy/setup-napcat.sh 默认 3000 端口）
+  access_token: ""                     # ←必填：与 NapCat 配置的 token 一致（setup 脚本会生成并打印）
+  group_ids: []                        # ←必填：目标 QQ 群号列表，第一个建议填测试群（演习只打第一个群），如 [123456789, 987654321]
+  admin_qq: 0                          # ←必填：接收告警的管理员 QQ 号
+  send_interval_ms: 3000               # 群消息发送最小间隔（防风控）
+  listen_addr: "127.0.0.1:3100"        # 接收 NapCat 群消息上报（/ask 等命令）；留空禁用
+  keepalive_interval_min: 3            # QQ 在线探测间隔（分钟）；0 禁用
+  restart_cmd: "docker restart napcat"    # 仅当NapCat进程本身死掉时执行（QQ掉线但WebUI存活=等人工扫码，不重启）
+  webui_url: "http://127.0.0.1:6099"       # NapCat WebUI 存活探测地址
+  qr_sync_cmd: "docker cp napcat:/app/napcat/cache/qrcode.png /root/worldcup-broadcaster/qrcode-login.png && docker cp napcat:/app/napcat/cache/qrcode.png /opt/worldcup/qrcode-login.png"  # 掉线时保持二维码最新
+  qr_file: "/opt/worldcup/qrcode-login.png"
+  qr_serve_addr: "0.0.0.0:8090"        # 自刷新扫码页监听地址
+  qr_public_url: ""  # 钉钉消息里的外链基址
+  qr_token: ""
+  ding_webhook: ""                     # ←填钉钉群机器人webhook（https://oapi.dingtalk.com/robot/send?access_token=...）
+  ding_secret: ""                      # ←机器人加签密钥（安全设置选了加签才填）
+  ding_keyword: ""                     # ←机器人安全设置的自定义关键词（设了就填，消息自动带上）
+
+qa:
+  history_size: 40                     # 群聊上下文条数
+  engage_probability: 0.15             # 非命令消息触发主动插话的概率
+  engage_cooldown_min: 4               # 两次主动插话最小间隔（分钟）
+  followup_window_sec: 180             # Bot发言后判定追问的时间窗（秒）
+  reply_gap_sec: 15                    # 同一群内两条对话回复的最小间隔（秒），回复排队按节奏发出
+  group_names:
+    # 123456789: "群昵称"   # /ask 人设里对该群的称呼
+  seed_personas: {}               # 初始成员人设示例： "昵称": "球队立场/背景描述"（管理员可在群里用 /人设 增改）
+
+espn:
+  league: "fifa.world"                 # ESPN 联赛标识，世界杯无需改动
+  poll_interval_sec: 20                # 比赛进行中的数据轮询间隔（秒）
+
+llm:
+  base_url: "https://api.deepseek.com"
+  model: "deepseek-v4-pro"
+  api_key: ""                          # ←必填：DeepSeek API Key（也可用环境变量 LLM_API_KEY）
+  timeout_sec: 180
+
+schedule:
+  timezone: "Asia/Shanghai"
+  preview_cron: "0 23 * * *"           # 每晚 23:00 推送次日赛程预告
+  recap_cron: "0 15 * * *"             # 每天 15:00 总结当日（凌晨踢完的）赛果
+
+events:                                # 实时播报开关
+  kickoff: true                        # 比赛开始
+  goal: true                           # 进球/点球/乌龙/点球射失
+  yellow_card: true                    # 黄牌
+  red_card: true                       # 红牌
+  halftime: true                       # 中场（含比分）
+  second_half_start: true              # 下半场开始（含比分）
+  substitution: true                   # 换人
+  period_change: true                  # 进入加时/加时各节点/进入点球大战
+  shootout_round: true                 # 点球大战逐轮播报
+  fulltime: true                       # 终场（含最终比分）
+
+data_dir: "./data"                     # 抓取数据与去重状态落盘目录
+
+log:
+  dir: "/var/log/worldcup"
+  level: "info"                        # debug / info / warn / error
+  max_age_days: 30
