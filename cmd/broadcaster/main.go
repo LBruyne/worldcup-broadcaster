@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -203,6 +204,15 @@ func qqKeepalive(ctx context.Context, cfg *config.Config, bot *onebot.Client, al
 		if consecutive < 2 {
 			continue // a single blip (e.g. napcat restarting) is not an outage
 		}
+		if napcatAlive(cfg.OneBot.WebUIURL) {
+			// NapCat itself is up but QQ is not logged in. A container
+			// restart cannot fix an invalidated session (quick login already
+			// failed at boot) and would kill any QR code mid-scan, so leave
+			// it running and page the admin instead.
+			logger.Warn("napcat alive but qq offline; awaiting manual login, skipping restart", "consecutive", consecutive)
+			alerter.Alert("qq-login", fmt.Sprintf("QQ不在线但NapCat存活（连续%d次探测失败）：疑似登录态失效，需要人工扫码重新登录，已暂停自动重启以保护二维码", consecutive))
+			continue
+		}
 		alerter.Alert("qq-online", fmt.Sprintf("QQ疑似掉线（连续%d次探测失败，err=%v），尝试自动重启 NapCat", consecutive, err))
 		if cfg.OneBot.RestartCmd != "" && time.Since(lastRestart) > 20*time.Minute {
 			lastRestart = time.Now()
@@ -215,6 +225,21 @@ func qqKeepalive(ctx context.Context, cfg *config.Config, bot *onebot.Client, al
 			}
 		}
 	}
+}
+
+// napcatAlive reports whether NapCat's WebUI answers HTTP at all — proof the
+// process is running even when the QQ account is logged out.
+func napcatAlive(webuiURL string) bool {
+	if webuiURL == "" {
+		return false
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(webuiURL)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return true
 }
 
 // simulateFixture replays every event of a recorded match summary through

@@ -129,7 +129,8 @@ needs 可选值（按需多选，无需数据时为空数组）：
 - "standings"：小组积分榜/出线形势
 - "leaderboards"：射手榜/助攻榜
 - "today"：今明两天的比赛
-search：以下情况【必须】填搜索关键词：问题涉及任何具体球员（人名）的数据/近况/效力球队/进球数，或本届世界杯数据之外的足球事实（历史战绩、转会、伤病、俱乐部赛事等）。可以给最多2个查询（用|分隔，例如"哈兰德 2024-25赛季 进球数|Haaland 2024-25 season goals"），中英文各一个效果最好。纯闲聊/对线/观点类问题才留空。
+search：以下情况【必须】填搜索关键词：问题涉及任何具体球员（人名）的数据/近况/效力球队/进球数，或本届世界杯数据之外的足球事实（历史战绩、转会、伤病、俱乐部赛事等）。可以给最多2个查询（用|分隔），中英文各一个效果最好。纯闲聊/对线/观点类问题才留空。
+搜索词里的相对时间必须先换算成具体赛季再写入：欧洲联赛赛季从每年8月跨到次年5月，按给出的"今天"换算（例：今天是2026年6月，刚结束的"上赛季/本赛季"=2025-26赛季，再往前一年才是2024-25）。涉及赛季数据时，搜索词必须同时含球员/球队名、换算后的具体赛季（如"2025-26"）、联赛或赛事名、指标名（进球/助攻等）。
 difficulty：涉及具体球员/球队事实数据的问题、需要多步推理/复杂分析/出线概率计算的，一律 hard；纯闲聊对线为 easy。`
 
 type routeResult struct {
@@ -197,29 +198,160 @@ func (h *Handler) grounding(ctx context.Context, question string) (string, bool)
 		}
 	}
 	searched := false
+	evidence := map[string]any{}
 	for _, q := range strings.Split(r.Search, "|") {
 		q = strings.TrimSpace(q)
 		if q == "" {
 			continue
 		}
-		if results := h.webSearch(ctx, q); results != "" {
-			data["网络搜索结果（查询:"+q+"）"] = json.RawMessage(results)
+		if results := h.webSearch(ctx, q); len(results) > 0 {
+			data["网络搜索结果（查询:"+q+"）"] = results
+			evidence["搜索（"+q+"）"] = results
 			searched = true
 		}
 	}
-	// Any question that needed a web search gets deep thinking: synthesizing
-	// snippets correctly is exactly where the cheap path hallucinates.
+	verdict := ""
 	if searched {
+		// Snippet synthesis is exactly where the cheap path hallucinates:
+		// run the deep-thinking fact verifier, which reads actual source
+		// pages and adjudicates a single answer.
 		r.Difficulty = "hard"
+		verdict = h.verifyFacts(ctx, question, evidence)
+		if verdict != "" {
+			data["数据核实结论"] = verdict
+		}
 	}
 	if len(data) == 0 {
 		// banter questions still get the cheap live snapshot for grounding
 		data["今日数据"] = json.RawMessage(h.liveData(ctx))
 	}
+	// When the verifier already produced an adjudicated conclusion, the final
+	// persona call is pure styling — skip a second (slow) thinking pass.
+	think := r.Difficulty == "hard" && verdict == ""
 	raw, err := json.Marshal(data)
 	if err != nil {
-		return "{}", r.Difficulty == "hard"
+		return "{}", think
 	}
-	h.logger.Info("question grounded", "needs", r.Needs, "search", r.Search, "difficulty", r.Difficulty)
-	return string(raw), r.Difficulty == "hard"
+	h.logger.Info("question grounded",
+		"needs", r.Needs, "search", r.Search, "difficulty", r.Difficulty, "verified", verdict != "")
+	return string(raw), think
+}
+
+const verifierPrompt = `你是足球数据核实员。给你一个问题和若干网络证据（搜索结果的标题/摘要/URL，可能还有权威来源的页面正文）。你的任务：深入思考，裁决出唯一、准确的事实结论。
+规则：
+- 先确定时间口径：会给你"今天"的日期。欧洲联赛赛季从每年8月跨到次年5月（例：今天是2026年6月，则"上赛季"=2025-26赛季）。
+- 严格区分统计口径：联赛进球≠各项赛事总进球≠生涯总进球≠为国家队进球；自媒体/视频标题（YouTube等）不可信；优先权威统计源（fbref、ESPN、联赛官网、Transfermarkt、StatMuse、维基百科的正文数据）。
+- 多个来源数字冲突时，分析冲突原因（口径不同？赛季不同？来源不可靠？），裁决出最可信的唯一答案。
+- 现有证据不足以下结论时，可要求补充搜索（换更精确的关键词）或抓取某条搜索结果URL的正文。
+只输出一行JSON，不要其他文字：
+{"conclusion":"一句话结论，必须包含赛季/口径、数字和依据来源","confidence":"high|medium|low","need_queries":"还需要的搜索词，最多2个用|分隔，不需要留空","need_url":"需要抓取正文的URL，不需要留空"}`
+
+type verdictEntry struct {
+	Verdict   string    `json:"verdict"`
+	FetchedAt time.Time `json:"fetched_at"`
+}
+
+// verifyFacts runs a deep-thinking adjudication pass over search evidence,
+// optionally fetching source pages or refining queries (one extra round),
+// and returns a single verified conclusion ("" when verification failed).
+func (h *Handler) verifyFacts(ctx context.Context, question string, evidence map[string]any) string {
+	tl, ok := h.llm.(ThinkingLLM)
+	if !ok {
+		return ""
+	}
+	cacheKey := "verdict-" + sanitizeKey(question)
+	var cached verdictEntry
+	if err := h.profiles.store.LoadJSON("wcdb", cacheKey, &cached); err == nil &&
+		time.Since(cached.FetchedAt) < searchTTL && cached.Verdict != "" {
+		return cached.Verdict
+	}
+
+	// Proactively read the first trusted source per query (2 pages max):
+	// real page text beats snippets and usually saves the refine round.
+	fetched := 0
+	for key, v := range evidence {
+		if fetched >= 2 {
+			break
+		}
+		results, ok := v.([]searchResult)
+		if !ok {
+			continue
+		}
+		for _, res := range results {
+			if res.URL == "" || !trustedSource(res.URL) {
+				continue
+			}
+			if text := fetchPageText(ctx, res.URL); text != "" {
+				evidence["页面正文（"+res.URL+"）"] = text
+				fetched++
+				h.logger.Info("verifier fetched source page", "for", key, "url", res.URL)
+			}
+			break
+		}
+	}
+
+	today := time.Now().UTC().Add(8 * time.Hour).Format("2006-01-02")
+	for round := 0; round < 2; round++ {
+		payload, err := json.Marshal(map[string]any{"今天": today, "问题": question, "证据": evidence})
+		if err != nil {
+			return ""
+		}
+		cctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+		out, err := tl.GenerateThink(cctx, verifierPrompt, string(payload), true)
+		cancel()
+		if err != nil {
+			h.logger.Error("fact verifier call failed", "error", err)
+			return ""
+		}
+		if i := strings.Index(out, "{"); i >= 0 {
+			if j := strings.LastIndex(out, "}"); j > i {
+				out = out[i : j+1]
+			}
+		}
+		var v struct {
+			Conclusion  string `json:"conclusion"`
+			Confidence  string `json:"confidence"`
+			NeedQueries string `json:"need_queries"`
+			NeedURL     string `json:"need_url"`
+		}
+		if err := json.Unmarshal([]byte(out), &v); err != nil {
+			h.logger.Error("fact verifier parse failed", "raw", out, "error", err)
+			return ""
+		}
+		if round == 0 && (v.NeedQueries != "" || v.NeedURL != "") {
+			grew := false
+			for _, q := range strings.SplitN(v.NeedQueries, "|", 2) {
+				q = strings.TrimSpace(q)
+				if q == "" {
+					continue
+				}
+				if results := h.webSearch(ctx, q); len(results) > 0 {
+					evidence["搜索（"+q+"）"] = results
+					grew = true
+				}
+			}
+			if v.NeedURL != "" {
+				if text := fetchPageText(ctx, v.NeedURL); text != "" {
+					evidence["页面正文（"+v.NeedURL+"）"] = text
+					grew = true
+				}
+			}
+			if grew {
+				h.logger.Info("verifier requested more evidence", "queries", v.NeedQueries, "url", v.NeedURL)
+				continue
+			}
+		}
+		if v.Conclusion == "" {
+			return ""
+		}
+		verdict := v.Conclusion
+		if v.Confidence != "" {
+			verdict += "（置信度:" + v.Confidence + "）"
+		}
+		if err := h.profiles.store.SaveJSON("wcdb", cacheKey, verdictEntry{Verdict: verdict, FetchedAt: time.Now()}); err != nil {
+			h.logger.Error("persist verdict cache failed", "error", err)
+		}
+		return verdict
+	}
+	return ""
 }

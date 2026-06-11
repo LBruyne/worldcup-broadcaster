@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"net/http/httptest"
 	"sync"
 	"testing"
@@ -154,5 +155,32 @@ func TestGetStatus(t *testing.T) {
 	down := New("http://127.0.0.1:1", "", []int64{1}, time.Millisecond, slog.Default())
 	if _, err := down.GetStatus(); err == nil {
 		t.Fatal("expected error when napcat unreachable")
+	}
+}
+
+func TestSplitMessage(t *testing.T) {
+	if got := splitMessage("short", 100); len(got) != 1 || got[0] != "short" {
+		t.Errorf("short = %v", got)
+	}
+	long := strings.Repeat("第一行内容\n", 100) // 600 runes
+	chunks := splitMessage(strings.TrimRight(long, "\n"), 100)
+	if len(chunks) != 7 {
+		t.Fatalf("chunks = %d", len(chunks))
+	}
+	for i, c := range chunks {
+		if n := len([]rune(c)); n > 100 {
+			t.Errorf("chunk %d = %d runes", i, n)
+		}
+		if strings.HasPrefix(c, "\n") || strings.HasSuffix(c, "\n") {
+			t.Errorf("chunk %d has dangling newline: %q", i, c)
+		}
+	}
+	if joined := strings.Join(chunks, "\n"); joined != strings.TrimRight(long, "\n") {
+		t.Error("chunks do not reassemble to original")
+	}
+	// a single line longer than max is hard-split
+	hard := splitMessage(strings.Repeat("a", 250), 100)
+	if len(hard) != 3 {
+		t.Errorf("hard split = %d", len(hard))
 	}
 }

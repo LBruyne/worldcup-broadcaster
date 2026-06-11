@@ -7,16 +7,20 @@ import (
 	"time"
 )
 
-// routerLLM answers the routing call with a canned route and the final ask
-// with a canned reply, recording both payloads.
+// routerLLM answers the routing call with a canned route, the fact-verifier
+// call with a canned verdict, and the final ask with a canned reply,
+// recording all payloads.
 type routerLLM struct {
-	route      string
-	answer     string
-	routeUser  string
-	askUser    string
-	askThink   bool
-	routeThink bool
-	calls      int
+	route       string
+	verdict     string
+	answer      string
+	routeUser   string
+	verifyUser  string
+	askUser     string
+	askThink    bool
+	routeThink  bool
+	verifyThink bool
+	calls       int
 }
 
 func (r *routerLLM) Generate(ctx context.Context, sys, user string) (string, error) {
@@ -28,6 +32,13 @@ func (r *routerLLM) GenerateThink(_ context.Context, sys, user string, think boo
 	if strings.Contains(sys, "数据路由器") {
 		r.routeUser, r.routeThink = user, think
 		return r.route, nil
+	}
+	if strings.Contains(sys, "数据核实员") {
+		r.verifyUser, r.verifyThink = user, think
+		if r.verdict == "" {
+			return "", context.DeadlineExceeded
+		}
+		return r.verdict, nil
 	}
 	r.askUser, r.askThink = user, think
 	return r.answer, nil
@@ -117,29 +128,78 @@ func TestParseDDG(t *testing.T) {
 	}
 }
 
-// A search-bearing route must force deep thinking even if the router said
-// easy, and multi-query "a|b" searches must both be attempted.
-func TestSearchForcesThinking(t *testing.T) {
+// A search-bearing route must run the deep-thinking fact verifier; its
+// verdict is injected for the final answer, which then skips thinking
+// (the verifier already did the heavy lifting).
+func TestSearchTriggersVerification(t *testing.T) {
 	llm := &routerLLM{
-		route:  `{"needs":[],"difficulty":"easy","search":"哈兰德 进球|Haaland goals"}`,
-		answer: "26球",
+		route:   `{"needs":[],"difficulty":"easy","search":"哈兰德 2025-26赛季 英超 进球数|Haaland 2025-26 Premier League goals"}`,
+		verdict: `{"conclusion":"哈兰德2025-26赛季英超进26球（来源:fbref）","confidence":"high"}`,
+		answer:  "26球",
 	}
 	h, sender := newHandler(t, llm)
 	// preload fake search cache entries so webSearch hits disk, not network
-	for _, q := range []string{"哈兰德 进球", "Haaland goals"} {
+	for _, q := range []string{"哈兰德 2025-26赛季 英超 进球数", "Haaland 2025-26 Premier League goals"} {
 		h.profiles.store.SaveJSON("wcdb", "search-"+sanitizeKey(q),
 			searchEntry{Results: []byte(`[{"title":"Haaland 26 goals","snippet":"x"}]`), FetchedAt: timeNow()})
 	}
-	h.OnGroupMessage(context.Background(), 861376113, 0, "小明", "/ask 哈兰德上赛季进了多少球")
+	h.OnGroupMessage(context.Background(), 861376113, 0, "小明", "/ask 哈兰德上赛季英超进了多少球")
 	deadlineWait(t, sender, 1)
-	if !llm.askThink {
-		t.Error("search-grounded question must enable thinking")
+	if !llm.verifyThink {
+		t.Error("fact verifier must run with thinking enabled")
 	}
-	if !strings.Contains(llm.askUser, "Haaland 26 goals") {
-		t.Errorf("search results missing: %.300s", llm.askUser)
+	if llm.askThink {
+		t.Error("final answer must skip thinking when a verdict is present")
+	}
+	if !strings.Contains(llm.askUser, "数据核实结论") || !strings.Contains(llm.askUser, "哈兰德2025-26赛季英超进26球") {
+		t.Errorf("verdict missing from grounded data: %.400s", llm.askUser)
+	}
+	if !strings.Contains(llm.verifyUser, "Haaland 26 goals") {
+		t.Errorf("verifier evidence missing search results: %.300s", llm.verifyUser)
 	}
 	if c := strings.Count(llm.askUser, "网络搜索结果"); c != 2 {
 		t.Errorf("expected 2 search blocks, got %d", c)
+	}
+}
+
+// When the verifier fails (LLM error), the final answer must fall back to
+// deep thinking over raw search results.
+func TestVerifierFailureFallsBackToThinking(t *testing.T) {
+	llm := &routerLLM{
+		route:  `{"needs":[],"difficulty":"easy","search":"哈兰德 测试失败查询"}`,
+		answer: "这我还真没数",
+	}
+	h, sender := newHandler(t, llm)
+	h.profiles.store.SaveJSON("wcdb", "search-"+sanitizeKey("哈兰德 测试失败查询"),
+		searchEntry{Results: []byte(`[{"title":"t","snippet":"s"}]`), FetchedAt: timeNow()})
+	h.OnGroupMessage(context.Background(), 861376113, 0, "小明", "/ask 哈兰德练习赛进了几个")
+	deadlineWait(t, sender, 1)
+	if !llm.askThink {
+		t.Error("verifier failure must fall back to thinking on the final answer")
+	}
+	if strings.Contains(llm.askUser, "数据核实结论") {
+		t.Error("no verdict should be injected when verification fails")
+	}
+}
+
+func TestDDGTargetURL(t *testing.T) {
+	href := "//duckduckgo.com/l/?uddg=https%3A%2F%2Ffbref.com%2Fen%2Fplayers%2F1f44ac21%2FErling-Haaland&rut=abc"
+	if got := ddgTargetURL(href); got != "https://fbref.com/en/players/1f44ac21/Erling-Haaland" {
+		t.Errorf("ddgTargetURL = %q", got)
+	}
+	if got := ddgTargetURL("https://example.com/x"); got != "https://example.com/x" {
+		t.Errorf("direct url = %q", got)
+	}
+}
+
+func TestTrustedSource(t *testing.T) {
+	for _, u := range []string{"https://fbref.com/en/x", "https://www.transfermarkt.us/y", "https://en.wikipedia.org/wiki/Z"} {
+		if !trustedSource(u) {
+			t.Errorf("%s should be trusted", u)
+		}
+	}
+	if trustedSource("https://www.youtube.com/watch?v=x") {
+		t.Error("youtube must not be a trusted stat source")
 	}
 }
 

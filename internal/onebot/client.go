@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -40,8 +41,9 @@ func New(baseURL, token string, groupIDs []int64, interval time.Duration, logger
 		token:    token,
 		groupIDs: groupIDs,
 		interval: interval,
-		http:     &http.Client{Timeout: 15 * time.Second},
-		logger:   logger,
+		// Long enough to outlive NapCat's internal 30s send-ack timeout.
+		http:   &http.Client{Timeout: 35 * time.Second},
+		logger: logger,
 		// Sized for a worst-case burst: a restart during several concurrent
 		// live matches can diff hundreds of events at once.
 		queue: make(chan groupMsg, 1024),
@@ -57,13 +59,37 @@ func (c *Client) Start(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case msg := <-c.queue:
-				if err := c.sendGroup(msg.groupID, msg.text); err != nil {
-					c.logger.Error("send group message failed", "error", err)
-					if c.OnSendError != nil {
-						// Off the consumer goroutine: an alert (private msg
-						// over the same HTTP endpoint) must not stall the
-						// group-message queue.
-						go c.OnSendError(err)
+				// Very long messages both trip NapCat's 30s send ack and
+				// look like spam to QQ risk control: send them in chunks,
+				// spaced like ordinary messages.
+				for i, part := range splitMessage(msg.text, maxMsgRunes) {
+					if i > 0 {
+						select {
+						case <-time.After(c.interval):
+						case <-ctx.Done():
+							return
+						}
+					}
+					err := c.sendGroup(msg.groupID, part)
+					if err != nil && strings.Contains(err.Error(), "Timeout") {
+						// QQ-side ack timeouts are usually transient; one
+						// spaced retry recovers most of them.
+						c.logger.Warn("send timed out, retrying once", "group", msg.groupID)
+						select {
+						case <-time.After(5 * time.Second):
+							err = c.sendGroup(msg.groupID, part)
+						case <-ctx.Done():
+							return
+						}
+					}
+					if err != nil {
+						c.logger.Error("send group message failed", "error", err)
+						if c.OnSendError != nil {
+							// Off the consumer goroutine: an alert (private msg
+							// over the same HTTP endpoint) must not stall the
+							// group-message queue.
+							go c.OnSendError(err)
+						}
 					}
 				}
 				select {
@@ -97,6 +123,47 @@ func (c *Client) EnqueueGroupTo(groupID int64, msg string) {
 	default:
 		c.logger.Error("onebot queue full, dropping message", "group", groupID, "message", msg)
 	}
+}
+
+// maxMsgRunes caps a single QQ group message; longer texts are chunked on
+// line boundaries.
+const maxMsgRunes = 1800
+
+// splitMessage breaks text into chunks of at most max runes, preferring line
+// boundaries; a single over-long line is hard-split.
+func splitMessage(text string, max int) []string {
+	if len([]rune(text)) <= max {
+		return []string{text}
+	}
+	var chunks []string
+	var cur []rune
+	for _, line := range strings.Split(text, "\n") {
+		r := []rune(line)
+		for len(r) > max {
+			if len(cur) > 0 {
+				chunks = append(chunks, string(cur))
+				cur = nil
+			}
+			chunks = append(chunks, string(r[:max]))
+			r = r[max:]
+		}
+		need := len(r)
+		if len(cur) > 0 {
+			need += len(cur) + 1
+		}
+		if need > max {
+			chunks = append(chunks, string(cur))
+			cur = nil
+		}
+		if len(cur) > 0 {
+			cur = append(cur, '\n')
+		}
+		cur = append(cur, r...)
+	}
+	if len(cur) > 0 {
+		chunks = append(chunks, string(cur))
+	}
+	return chunks
 }
 
 func (c *Client) sendGroup(groupID int64, msg string) error {

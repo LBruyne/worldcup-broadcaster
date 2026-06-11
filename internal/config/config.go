@@ -27,6 +27,12 @@ type OneBot struct {
 	// RestartCmd is executed (via sh -c) when QQ is detected offline,
 	// at most once per 20 minutes.
 	RestartCmd string `yaml:"restart_cmd"`
+	// WebUIURL is NapCat's WebUI address, used as a liveness probe: when QQ
+	// is offline but the WebUI still answers, NapCat is alive and merely
+	// waiting for a manual login — restarting would only invalidate the QR
+	// code being scanned, so the keepalive skips the restart. Empty disables
+	// the probe (always restart on outage).
+	WebUIURL string `yaml:"webui_url"`
 }
 
 type QA struct {
@@ -104,6 +110,7 @@ func defaults() *Config {
 			ListenAddr:           "127.0.0.1:3100",
 			KeepaliveIntervalMin: 3,
 			RestartCmd:           "docker restart napcat",
+			WebUIURL:             "http://127.0.0.1:6099",
 		},
 		QA: QA{
 			HistorySize:       40,
