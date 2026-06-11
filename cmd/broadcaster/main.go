@@ -127,7 +127,7 @@ func main() {
 		if llmClient != nil {
 			qaLLM = llmClient
 		}
-		qaHandler := qa.NewHandler(cfg.OneBot.GroupIDs, bot, qaLLM, dig, espnClient, cfg.QA.HistorySize, logger)
+		qaHandler := qa.NewHandler(cfg.OneBot.GroupIDs, cfg.QA.GroupNames, bot, qaLLM, dig, espnClient, cfg.QA.HistorySize, logger)
 		go func() {
 			if err := qa.StartServer(ctx, cfg.OneBot.ListenAddr, qaHandler, logger); err != nil {
 				logger.Error("qa server failed", "error", err)

@@ -31,6 +31,9 @@ type OneBot struct {
 
 type QA struct {
 	HistorySize int `yaml:"history_size"` // chat context window for /ask
+	// GroupNames maps group id -> the in-persona name for that group
+	// (e.g. the production group is to be called 示例群).
+	GroupNames map[int64]string `yaml:"group_names"`
 }
 
 type ESPN struct {

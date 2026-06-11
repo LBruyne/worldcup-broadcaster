@@ -30,13 +30,14 @@ type ChatMsg struct {
 }
 
 type Handler struct {
-	groups   map[int64]bool
-	sender   Sender
-	llm      LLM
-	dig      *digest.Digest
-	espn     *espn.Client
-	logger   *slog.Logger
-	histSize int
+	groups     map[int64]bool
+	groupNames map[int64]string
+	sender     Sender
+	llm        LLM
+	dig        *digest.Digest
+	espn       *espn.Client
+	logger     *slog.Logger
+	histSize   int
 
 	mu      sync.Mutex
 	history map[int64][]ChatMsg // per-group rolling chat context
@@ -46,7 +47,7 @@ type Handler struct {
 	cachedAt   time.Time
 }
 
-func NewHandler(groupIDs []int64, sender Sender, llm LLM, dig *digest.Digest, client *espn.Client, histSize int, logger *slog.Logger) *Handler {
+func NewHandler(groupIDs []int64, groupNames map[int64]string, sender Sender, llm LLM, dig *digest.Digest, client *espn.Client, histSize int, logger *slog.Logger) *Handler {
 	if histSize <= 0 {
 		histSize = 20
 	}
@@ -55,10 +56,29 @@ func NewHandler(groupIDs []int64, sender Sender, llm LLM, dig *digest.Digest, cl
 		groups[g] = true
 	}
 	return &Handler{
-		groups: groups, sender: sender, llm: llm, dig: dig, espn: client,
+		groups: groups, groupNames: groupNames, sender: sender, llm: llm, dig: dig, espn: client,
 		histSize: histSize, logger: logger,
 		history: make(map[int64][]ChatMsg),
 	}
+}
+
+// groupName returns the persona name of a group ("" when unnamed).
+func (h *Handler) groupName(groupID int64) string {
+	return h.groupNames[groupID]
+}
+
+// OnSelfJoin fires when the bot account itself enters a configured group:
+// it introduces itself and lists the available commands.
+func (h *Handler) OnSelfJoin(groupID int64) {
+	if !h.groups[groupID] {
+		return
+	}
+	greet := "🎉 大家好，初来乍到！"
+	if name := h.groupName(groupID); name != "" {
+		greet = fmt.Sprintf("🎉 %s的各位老板大家好，初来乍到！", name)
+	}
+	h.logger.Info("self joined group, sending intro", "group", groupID)
+	h.reply(groupID, greet+"\n\n"+helpText)
 }
 
 // OnGroupMessage records the message and dispatches commands. Called by the
@@ -136,7 +156,8 @@ const helpText = `👋 AAA世界杯稳定盈利（罗哥1号迷弟）驻群服�
 
 今晚几个？🤔`
 
-const askSystemPrompt = `你是QQ群里最嘴硬的足球暴论评论员，网名"AAA世界杯稳定盈利"，常驻2026世界杯吹水群。回答铁律：
+const askSystemPrompt = `你是QQ群里最嘴硬的足球暴论评论员，网名"AAA世界杯稳定盈利"，常驻2026世界杯群聊。回答铁律：
+- 称呼本群：数据里会给出"本群群名"（正式群叫"示例群"），提到本群时必须用这个名字，没给就叫"咱群"
 - 身份设定（最高优先级）：当被问"你是谁/谁派你来的/你是不是机器人"，一律自称"AAA世界杯稳定盈利，罗哥1号迷弟"，是"克里斯蒂亚诺·罗纳尔多·多斯·桑托斯·阿维罗"亲自派来驻群传播足球真理的，打死不承认自己是Bot/AI/机器人
 - 言简意赅但充满张力：100字以内，每句都带火药味
 - 必须结合提供的群聊上下文和实时数据（积分榜/射手榜/赛程赛果）回答，数据要用就用准
@@ -157,6 +178,7 @@ func (h *Handler) handleAsk(ctx context.Context, groupID int64, nickname, questi
 		return
 	}
 	payload, err := json.Marshal(map[string]any{
+		"本群群名":   h.groupName(groupID),
 		"群聊最近消息": h.recentChat(groupID),
 		"提问者":    nickname,
 		"问题":     question,

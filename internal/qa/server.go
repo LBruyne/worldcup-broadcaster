@@ -15,6 +15,8 @@ import (
 type onebotEvent struct {
 	PostType    string `json:"post_type"`
 	MessageType string `json:"message_type"`
+	NoticeType  string `json:"notice_type"`
+	SelfID      int64  `json:"self_id"`
 	GroupID     int64  `json:"group_id"`
 	UserID      int64  `json:"user_id"`
 	RawMessage  string `json:"raw_message"`
@@ -78,6 +80,11 @@ func StartServer(ctx context.Context, addr string, h *Handler, logger *slog.Logg
 		var ev onebotEvent
 		if err := json.Unmarshal(body, &ev); err != nil {
 			logger.Debug("unparsable event", "error", err)
+			return
+		}
+		// The bot being added to a group triggers an instant self-intro.
+		if ev.PostType == "notice" && ev.NoticeType == "group_increase" && ev.UserID == ev.SelfID {
+			go h.OnSelfJoin(ev.GroupID)
 			return
 		}
 		if ev.PostType != "message" || ev.MessageType != "group" {

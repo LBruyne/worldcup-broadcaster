@@ -93,7 +93,7 @@ func newHandler(t *testing.T, llm LLM) (*Handler, *fakeSender) {
 	sender := &fakeSender{}
 	logger := slog.Default()
 	dig := digest.New(client, nil, store.New(t.TempDir()), sender, func(string, string) {}, logger)
-	return NewHandler([]int64{861376113, 1093353838}, sender, llm, dig, client, 20, logger), sender
+	return NewHandler([]int64{861376113, 1093353838}, map[int64]string{1093353838: "示例群"}, sender, llm, dig, client, 20, logger), sender
 }
 
 func TestHelp(t *testing.T) {
@@ -244,5 +244,56 @@ func TestPerGroupIsolation(t *testing.T) {
 	defer sender.mu.Unlock()
 	if n := len(sender.gids); n == 0 || sender.gids[n-1] != 1093353838 {
 		t.Errorf("reply target = %v, want prod group", sender.gids)
+	}
+}
+
+func TestSelfJoinIntro(t *testing.T) {
+	h, sender := newHandler(t, nil)
+	h.OnSelfJoin(1093353838)
+	got := sender.last(t)
+	if !strings.Contains(got, "示例群的各位老板") || !strings.Contains(got, "/ask") {
+		t.Errorf("intro wrong:\n%s", got)
+	}
+	h.OnSelfJoin(424242) // unknown group: silent
+	if sender.count() != 1 {
+		t.Error("unknown group join should be ignored")
+	}
+}
+
+func TestAskCarriesGroupName(t *testing.T) {
+	llm := &fakeLLM{reply: "ok"}
+	h, _ := newHandler(t, llm)
+	h.OnGroupMessage(context.Background(), 1093353838, "社员", "/ask 咱们群叫什么")
+	if !strings.Contains(llm.gotUser, "示例群") {
+		t.Errorf("group name missing from payload: %.200s", llm.gotUser)
+	}
+	if !strings.Contains(llm.gotSys, "示例群") {
+		t.Error("persona prompt missing group-name rule")
+	}
+}
+
+func TestServerSelfJoinNotice(t *testing.T) {
+	h, sender := newHandler(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	addr := "127.0.0.1:39132"
+	go StartServer(ctx, addr, h, slog.Default())
+	time.Sleep(100 * time.Millisecond)
+
+	raw, _ := json.Marshal(map[string]any{
+		"post_type": "notice", "notice_type": "group_increase",
+		"group_id": 1093353838, "user_id": 1051722693, "self_id": 1051722693,
+	})
+	resp, err := http.Post("http://"+addr+"/", "application/json", bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	deadline := time.Now().Add(3 * time.Second)
+	for sender.count() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := sender.last(t); !strings.Contains(got, "示例群") {
+		t.Errorf("join intro via server wrong:\n%s", got)
 	}
 }
