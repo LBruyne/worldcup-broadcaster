@@ -129,8 +129,8 @@ needs 可选值（按需多选，无需数据时为空数组）：
 - "standings"：小组积分榜/出线形势
 - "leaderboards"：射手榜/助攻榜
 - "today"：今明两天的比赛
-search：本届世界杯数据之外的事实问题（球员效力俱乐部、历史战绩、转会、伤病、非世界杯赛事等）才填搜索关键词，否则留空字符串。闲聊/对线/观点类问题不需要搜索。
-difficulty：需要多步推理/复杂分析/出线概率计算的为 hard，事实查询和日常对线为 easy。`
+search：以下情况【必须】填搜索关键词：问题涉及任何具体球员（人名）的数据/近况/效力球队/进球数，或本届世界杯数据之外的足球事实（历史战绩、转会、伤病、俱乐部赛事等）。可以给最多2个查询（用|分隔，例如"哈兰德 2024-25赛季 进球数|Haaland 2024-25 season goals"），中英文各一个效果最好。纯闲聊/对线/观点类问题才留空。
+difficulty：涉及具体球员/球队事实数据的问题、需要多步推理/复杂分析/出线概率计算的，一律 hard；纯闲聊对线为 easy。`
 
 type routeResult struct {
 	Needs      []string `json:"needs"`
@@ -196,10 +196,21 @@ func (h *Handler) grounding(ctx context.Context, question string) (string, bool)
 			data["今日数据"] = todays
 		}
 	}
-	if r.Search != "" {
-		if results := h.webSearch(ctx, r.Search); results != "" {
-			data["网络搜索结果（查询:"+r.Search+"）"] = json.RawMessage(results)
+	searched := false
+	for _, q := range strings.Split(r.Search, "|") {
+		q = strings.TrimSpace(q)
+		if q == "" {
+			continue
 		}
+		if results := h.webSearch(ctx, q); results != "" {
+			data["网络搜索结果（查询:"+q+"）"] = json.RawMessage(results)
+			searched = true
+		}
+	}
+	// Any question that needed a web search gets deep thinking: synthesizing
+	// snippets correctly is exactly where the cheap path hallucinates.
+	if searched {
+		r.Difficulty = "hard"
 	}
 	if len(data) == 0 {
 		// banter questions still get the cheap live snapshot for grounding

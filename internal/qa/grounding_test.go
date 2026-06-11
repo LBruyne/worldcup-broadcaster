@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 // routerLLM answers the routing call with a canned route and the final ask
@@ -115,3 +116,31 @@ func TestParseDDG(t *testing.T) {
 		t.Errorf("res0 = %+v", res[0])
 	}
 }
+
+// A search-bearing route must force deep thinking even if the router said
+// easy, and multi-query "a|b" searches must both be attempted.
+func TestSearchForcesThinking(t *testing.T) {
+	llm := &routerLLM{
+		route:  `{"needs":[],"difficulty":"easy","search":"哈兰德 进球|Haaland goals"}`,
+		answer: "26球",
+	}
+	h, sender := newHandler(t, llm)
+	// preload fake search cache entries so webSearch hits disk, not network
+	for _, q := range []string{"哈兰德 进球", "Haaland goals"} {
+		h.profiles.store.SaveJSON("wcdb", "search-"+sanitizeKey(q),
+			searchEntry{Results: []byte(`[{"title":"Haaland 26 goals","snippet":"x"}]`), FetchedAt: timeNow()})
+	}
+	h.OnGroupMessage(context.Background(), 861376113, 0, "小明", "/ask 哈兰德上赛季进了多少球")
+	deadlineWait(t, sender, 1)
+	if !llm.askThink {
+		t.Error("search-grounded question must enable thinking")
+	}
+	if !strings.Contains(llm.askUser, "Haaland 26 goals") {
+		t.Errorf("search results missing: %.300s", llm.askUser)
+	}
+	if c := strings.Count(llm.askUser, "网络搜索结果"); c != 2 {
+		t.Errorf("expected 2 search blocks, got %d", c)
+	}
+}
+
+func timeNow() time.Time { return time.Now() }
