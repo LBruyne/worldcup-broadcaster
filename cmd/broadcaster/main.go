@@ -138,6 +138,7 @@ func main() {
 			SeedPersonas:   cfg.QA.SeedPersonas,
 		}, bot, qaLLM, dig, espnClient, st, logger)
 		qaHandler.SetMemberLister(bot)
+		qaHandler.Start(ctx)
 		go func() {
 			if err := qa.StartServer(ctx, cfg.OneBot.ListenAddr, qaHandler, logger); err != nil {
 				logger.Error("qa server failed", "error", err)

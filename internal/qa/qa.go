@@ -75,15 +75,25 @@ type Handler struct {
 	dataMu     sync.Mutex
 	cachedData string
 	cachedAt   time.Time
+
+	// askQueue serializes /ask handling: questions are answered strictly
+	// one at a time in arrival order, so concurrent askers can't produce
+	// interleaved replies or pile up parallel LLM calls.
+	askQueue chan askTask
+}
+
+type askTask struct {
+	groupID  int64
+	nickname string
+	question string
 }
 
 func NewHandler(opts Options, sender Sender, llm LLM, dig *digest.Digest, client *espn.Client, st *store.Store, logger *slog.Logger) *Handler {
 	if opts.HistorySize <= 0 {
 		opts.HistorySize = 40
 	}
-	if opts.EngageProb <= 0 {
-		opts.EngageProb = 0.15
-	}
+	// EngageProb 0 disables proactive interjections; the production default
+	// (0.15) comes from the config layer.
 	if opts.EngageCooldown <= 0 {
 		opts.EngageCooldown = 4 * time.Minute
 	}
@@ -103,7 +113,23 @@ func NewHandler(opts Options, sender Sender, llm LLM, dig *digest.Digest, client
 		lastBotMsg: make(map[int64]time.Time),
 		lastEngage: make(map[int64]time.Time),
 		engageBusy: make(map[int64]bool),
+		askQueue:   make(chan askTask, 16),
 	}
+}
+
+// Start launches the ask worker; questions queue up and are answered one by
+// one. Must be called once before serving events.
+func (h *Handler) Start(ctx context.Context) {
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case t := <-h.askQueue:
+				h.handleAsk(ctx, t.groupID, t.nickname, t.question)
+			}
+		}
+	}()
 }
 
 // groupName returns the persona name of a group ("" when unnamed).
@@ -198,7 +224,14 @@ func (h *Handler) OnGroupMessage(ctx context.Context, groupID, userID int64, nic
 	case "/help", "/帮助":
 		h.reply(groupID, helpText)
 	case "/ask", "/问", "/提问":
-		h.handleAsk(ctx, groupID, nickname, arg)
+		select {
+		case h.askQueue <- askTask{groupID: groupID, nickname: nickname, question: arg}:
+			if n := len(h.askQueue); n > 1 {
+				h.logger.Info("ask queued", "position", n, "from", nickname)
+			}
+		default:
+			h.reply(groupID, fmt.Sprintf("@%s 提问太火爆，队列满了，缓缓再 /ask 🥵", nickname))
+		}
 	case "/赛果", "/results", "/result":
 		h.reply(groupID, h.cmdResults(ctx))
 	case "/积分榜", "/table", "/积分":

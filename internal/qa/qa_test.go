@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -113,6 +114,9 @@ func newHandler(t *testing.T, llm LLM) (*Handler, *fakeSender) {
 			"铁哥":  "曼联球迷，C罗粉，数据决定一切，同行",
 		},
 	}, sender, llm, dig, client, st, logger)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	h.Start(ctx)
 	return h, sender
 }
 
@@ -142,6 +146,7 @@ func TestAskUsesContextAndData(t *testing.T) {
 	h.OnGroupMessage(ctx, 861376113, 0, "小明", "我觉得C罗才是GOAT")
 	h.OnGroupMessage(ctx, 861376113, 0, "小红", "梅西七个金球笑而不语")
 	h.OnGroupMessage(ctx, 861376113, 0, "小明", "/ask 梅西和C罗到底谁厉害？")
+	deadlineWait(t, sender, 1)
 
 	if got := sender.last(t); !strings.Contains(got, "梅西球王") {
 		t.Errorf("reply = %s", got)
@@ -160,6 +165,7 @@ func TestAskUsesContextAndData(t *testing.T) {
 func TestAskWithoutQuestion(t *testing.T) {
 	h, sender := newHandler(t, &fakeLLM{reply: "x"})
 	h.OnGroupMessage(context.Background(), 861376113, 0, "小明", "/ask")
+	deadlineWait(t, sender, 1)
 	if got := sender.last(t); !strings.Contains(got, "用法") {
 		t.Errorf("reply = %s", got)
 	}
@@ -253,6 +259,7 @@ func TestPerGroupIsolation(t *testing.T) {
 	h.OnGroupMessage(ctx, 861376113, 0, "测试群人", "测试群的秘密暗号XYZZY")
 	h.OnGroupMessage(ctx, 1093353838, 0, "正式群人", "正式群只聊球")
 	h.OnGroupMessage(ctx, 1093353838, 0, "正式群人", "/ask 群里刚才聊了啥")
+	deadlineWait(t, sender, 1)
 
 	if strings.Contains(llm.gotUser, "XYZZY") {
 		t.Error("test-group chat leaked into prod-group /ask context")
@@ -282,8 +289,9 @@ func TestSelfJoinIntro(t *testing.T) {
 
 func TestAskCarriesGroupName(t *testing.T) {
 	llm := &fakeLLM{reply: "ok"}
-	h, _ := newHandler(t, llm)
+	h, sender := newHandler(t, llm)
 	h.OnGroupMessage(context.Background(), 1093353838, 0, "社员", "/ask 咱们群叫什么")
+	deadlineWait(t, sender, 1)
 	if !strings.Contains(llm.gotUser, "示例群") {
 		t.Errorf("group name missing from payload: %.200s", llm.gotUser)
 	}
@@ -325,9 +333,7 @@ func TestEngageFollowup(t *testing.T) {
 	h, sender := newHandler(t, llm)
 	ctx := context.Background()
 	h.OnGroupMessage(ctx, 861376113, 0, "小明", "/ask 葡萄牙能夺冠吗")
-	if sender.count() != 1 {
-		t.Fatalf("ask reply missing, msgs=%d", sender.count())
-	}
+	deadlineWait(t, sender, 1)
 	// within followup window: bot must evaluate and (per fake llm) answer
 	h.OnGroupMessage(ctx, 861376113, 0, "小明", "你懂个球，C罗带队必夺冠")
 	deadlineWait(t, sender, 2)
@@ -348,6 +354,7 @@ func TestEngagePassStaysSilent(t *testing.T) {
 	h, sender := newHandler(t, llm)
 	ctx := context.Background()
 	h.OnGroupMessage(ctx, 861376113, 0, "小明", "/ask 在吗")
+	deadlineWait(t, sender, 1) // the ask reply itself
 	base := sender.count()
 	h.OnGroupMessage(ctx, 861376113, 0, "小红", "今天中午吃啥")
 	time.Sleep(100 * time.Millisecond)
@@ -407,10 +414,11 @@ func TestPersonaCommand(t *testing.T) {
 
 func TestAskCarriesPersonas(t *testing.T) {
 	llm := &fakeLLM{reply: "ok"}
-	h, _ := newHandler(t, llm)
+	h, sender := newHandler(t, llm)
 	ctx := context.Background()
 	h.OnGroupMessage(ctx, 861376113, 0, "铁哥", "数据才是硬道理")
 	h.OnGroupMessage(ctx, 861376113, 0, "铁哥", "/ask C罗是不是史上最佳")
+	deadlineWait(t, sender, 1)
 	if !strings.Contains(llm.gotUser, "数据决定一切") {
 		t.Errorf("asker persona missing: %.300s", llm.gotUser)
 	}
@@ -428,4 +436,83 @@ func deadlineWait(t *testing.T, s *fakeSender, want int) {
 	if s.count() < want {
 		t.Fatalf("timed out waiting for %d messages, have %d", want, s.count())
 	}
+}
+
+// Concurrent askers: every question answered exactly once, strictly serial,
+// and an overflowing queue is rejected politely instead of deadlocking.
+func TestConcurrentAsksSerialized(t *testing.T) {
+	var inflight, maxInflight atomic.Int32
+	llm := &slowLLM{delay: 30 * time.Millisecond, inflight: &inflight, max: &maxInflight}
+	h, sender := newHandler(t, llm)
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			h.OnGroupMessage(ctx, 861376113, 0, fmt.Sprintf("提问人%d", i), fmt.Sprintf("/ask 问题%d", i))
+		}(i)
+	}
+	wg.Wait()
+	deadlineWait(t, sender, 10)
+	if maxInflight.Load() > 1 {
+		t.Fatalf("LLM concurrency = %d, want strictly serial", maxInflight.Load())
+	}
+	if sender.count() != 10 {
+		t.Fatalf("replies = %d, want exactly 10", sender.count())
+	}
+}
+
+func TestAskQueueOverflowRejected(t *testing.T) {
+	block := make(chan struct{})
+	llm := &blockingLLM{block: block}
+	h, sender := newHandler(t, llm)
+	ctx := context.Background()
+	// 1 in-flight + 16 queued + N rejected
+	for i := 0; i < 25; i++ {
+		h.OnGroupMessage(ctx, 861376113, 0, "轰炸机", fmt.Sprintf("/ask 问题%d", i))
+	}
+	deadlineWait(t, sender, 1) // at least one rejection notice arrives sync
+	found := false
+	sender.mu.Lock()
+	for _, m := range sender.msgs {
+		if strings.Contains(m, "队列满") {
+			found = true
+		}
+	}
+	sender.mu.Unlock()
+	if !found {
+		t.Fatal("overflow not rejected")
+	}
+	close(block) // release; no goroutine leak / deadlock
+}
+
+type slowLLM struct {
+	delay    time.Duration
+	inflight *atomic.Int32
+	max      *atomic.Int32
+}
+
+func (s *slowLLM) Generate(_ context.Context, _, user string) (string, error) {
+	cur := s.inflight.Add(1)
+	for {
+		old := s.max.Load()
+		if cur <= old || s.max.CompareAndSwap(old, cur) {
+			break
+		}
+	}
+	time.Sleep(s.delay)
+	s.inflight.Add(-1)
+	return "答案", nil
+}
+
+type blockingLLM struct{ block chan struct{} }
+
+func (b *blockingLLM) Generate(ctx context.Context, _, _ string) (string, error) {
+	select {
+	case <-b.block:
+	case <-ctx.Done():
+	}
+	return "迟到的答案", nil
 }
