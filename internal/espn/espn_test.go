@@ -187,3 +187,22 @@ func TestParseAthleteStats(t *testing.T) {
 		t.Errorf("row0 stats = %v", r0.Stats)
 	}
 }
+
+// Search hits sometimes carry a GUID in the id field; the numeric athlete
+// id must come from the uid ("s:600~a:253989").
+func TestParseAthleteSearchNumericID(t *testing.T) {
+	body := []byte(`{"results":[{"type":"player","contents":[
+		{"id":"d41614d6-11bc-0e9b","uid":"s:600~a:424204","displayName":"Alphonso Davies","description":"Bayern Munich"},
+		{"id":"253989","uid":"s:600~a:253989","displayName":"Erling Haaland","description":"Premier League"},
+		{"id":"999","uid":"s:40~l:41~a:999","displayName":"Some NBA Guy","description":"NBA"}]}]}`)
+	got, err := parseAthleteSearch(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("athletes = %d, want 2 (non-soccer filtered)", len(got))
+	}
+	if got[0].ID != "424204" || got[1].ID != "253989" {
+		t.Errorf("ids = %s, %s", got[0].ID, got[1].ID)
+	}
+}

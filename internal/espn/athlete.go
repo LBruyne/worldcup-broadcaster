@@ -54,7 +54,13 @@ func parseAthleteSearch(body []byte) ([]Athlete, error) {
 			if !strings.Contains(c.UID, "s:600~") {
 				continue
 			}
-			out = append(out, Athlete{ID: c.ID, DisplayName: c.DisplayName, Description: c.Description})
+			// the id field is sometimes a GUID; the stats endpoint needs
+			// the numeric athlete id embedded in the uid ("s:600~a:253989")
+			id := c.ID
+			if i := strings.LastIndex(c.UID, "~a:"); i >= 0 {
+				id = c.UID[i+len("~a:"):]
+			}
+			out = append(out, Athlete{ID: id, DisplayName: c.DisplayName, Description: c.Description})
 		}
 	}
 	return out, nil
