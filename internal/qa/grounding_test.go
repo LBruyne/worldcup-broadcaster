@@ -272,3 +272,18 @@ func TestResolveMatchRefByTeam(t *testing.T) {
 		t.Error("unknown team must resolve to nil")
 	}
 }
+
+// A direct @-question to the bot (called mode) about the current match must
+// flow through the grounding pipeline and carry the per-match feed.
+func TestCalledEngageGetsGrounding(t *testing.T) {
+	llm := &routerLLM{
+		route:  `{"needs":[],"difficulty":"easy","search":""}`,
+		answer: "首发给你列好了",
+	}
+	h, sender := newHandler(t, llm)
+	h.OnGroupMessage(context.Background(), 861376113, 0, "铁哥", "AAA 这场比赛首发阵容是什么")
+	deadlineWait(t, sender, 1)
+	if !strings.Contains(llm.askUser, "已核实数据") || !strings.Contains(llm.askUser, "比赛详情（当前）") {
+		t.Errorf("called engage missing grounded match detail: %.300s", llm.askUser)
+	}
+}

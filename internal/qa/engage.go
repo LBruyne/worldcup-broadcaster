@@ -54,7 +54,7 @@ func (h *Handler) maybeEngage(ctx context.Context, groupID int64, nickname, text
 
 	chat := h.recentChat(groupID)
 	styleDesc, tone := h.styleContext(groupID)
-	payload, err := json.Marshal(map[string]any{
+	fields := map[string]any{
 		"模式":     mode,
 		"本群群名":   h.groupName(groupID),
 		"本群说话风格": styleDesc,
@@ -63,14 +63,31 @@ func (h *Handler) maybeEngage(ctx context.Context, groupID int64, nickname, text
 		"发言者画像":  h.profiles.Persona(nickname),
 		"在场成员画像": h.profiles.Known(chat),
 		"群聊上下文":  chat,
-		"实时数据":   json.RawMessage(h.liveData(ctx)),
-	})
+	}
+	// A direct question to the bot (called) or a factual follow-up deserves
+	// the same grounded data as /ask — match details, search, verification.
+	// Plain banter keeps the cheap live snapshot.
+	think := false
+	if mode != "proactive" && (factualQuestionRe.MatchString(text) || deicticMatchRe.MatchString(text)) {
+		grounded, hard := h.grounding(ctx, text)
+		fields["今天"] = time.Now().UTC().Add(8 * time.Hour).Format("2006-01-02") + "（北京时间）"
+		fields["已核实数据"] = json.RawMessage(grounded)
+		think = hard
+	} else {
+		fields["实时数据"] = json.RawMessage(h.liveData(ctx))
+	}
+	payload, err := json.Marshal(fields)
 	if err != nil {
 		return
 	}
-	cctx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	cctx, cancel := context.WithTimeout(ctx, 150*time.Second)
 	defer cancel()
-	out, err := h.llm.Generate(cctx, engageSystemPrompt, string(payload))
+	var out string
+	if tl, ok := h.llm.(ThinkingLLM); ok {
+		out, err = tl.GenerateThink(cctx, engageSystemPrompt, string(payload), think)
+	} else {
+		out, err = h.llm.Generate(cctx, engageSystemPrompt, string(payload))
+	}
 	if err != nil {
 		h.logger.Error("engage llm failed", "error", err)
 		return
