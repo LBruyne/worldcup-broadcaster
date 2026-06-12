@@ -66,6 +66,9 @@ func main() {
 	bot := onebot.New(cfg.OneBot.BaseURL, cfg.OneBot.AccessToken, cfg.OneBot.GroupIDs,
 		time.Duration(cfg.OneBot.SendIntervalMS)*time.Millisecond, logger)
 	alerter := alert.New(bot, cfg.OneBot.AdminQQ, logger)
+	if cfg.OneBot.AlertCmd != "" {
+		alerter.SetCommand(cfg.OneBot.AlertCmd)
+	}
 	bot.OnSendError = func(err error) { alerter.Alert("onebot", "QQ消息发送失败: "+err.Error()) }
 	bot.Start(ctx)
 

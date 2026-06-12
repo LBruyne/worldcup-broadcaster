@@ -27,6 +27,10 @@ type OneBot struct {
 	// RestartCmd is executed (via sh -c) when QQ is detected offline,
 	// at most once per 20 minutes.
 	RestartCmd string `yaml:"restart_cmd"`
+	// AlertCmd, when set, runs (sh -c) for every admin alert with
+	// ALERT_CATEGORY / ALERT_MESSAGE env vars — a fallback channel
+	// (Telegram/Server酱/webhook) that works while QQ itself is down.
+	AlertCmd string `yaml:"alert_cmd"`
 	// WebUIURL is NapCat's WebUI address, used as a liveness probe: when QQ
 	// is offline but the WebUI still answers, NapCat is alive and merely
 	// waiting for a manual login — restarting would only invalidate the QR

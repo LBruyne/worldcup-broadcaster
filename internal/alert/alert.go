@@ -5,6 +5,8 @@ package alert
 import (
 	"fmt"
 	"log/slog"
+	"os"
+	"os/exec"
 	"sync"
 	"time"
 )
@@ -18,6 +20,7 @@ type Alerter struct {
 	adminQQ  int64
 	logger   *slog.Logger
 	cooldown time.Duration
+	cmd      string // optional fallback shell command (webhook etc.)
 
 	mu   sync.Mutex
 	last map[string]time.Time
@@ -36,11 +39,16 @@ func New(n Notifier, adminQQ int64, logger *slog.Logger) *Alerter {
 	}
 }
 
-// Alert logs the problem and, at most once per cooldown per category, sends
-// a private QQ message to the admin.
+// SetCommand wires an external fallback channel: cmd runs via sh -c with
+// ALERT_CATEGORY / ALERT_MESSAGE in its environment. Unlike the QQ private
+// message, it still works while the QQ session itself is dead.
+func (a *Alerter) SetCommand(cmd string) { a.cmd = cmd }
+
+// Alert logs the problem and, at most once per cooldown per category,
+// notifies the admin via QQ private message and the fallback command.
 func (a *Alerter) Alert(category, msg string) {
 	a.logger.Error("ALERT", "category", category, "message", msg)
-	if a.adminQQ == 0 {
+	if a.adminQQ == 0 && a.cmd == "" {
 		return
 	}
 	a.mu.Lock()
@@ -53,7 +61,18 @@ func (a *Alerter) Alert(category, msg string) {
 	a.mu.Unlock()
 
 	text := fmt.Sprintf("⚠️ 世界杯Bot告警 [%s]\n%s\n时间: %s", category, msg, now.Format("2006-01-02 15:04:05"))
-	if err := a.notifier.SendPrivate(a.adminQQ, text); err != nil {
-		a.logger.Error("failed to deliver alert to admin", "error", err)
+	if a.adminQQ != 0 {
+		if err := a.notifier.SendPrivate(a.adminQQ, text); err != nil {
+			a.logger.Error("failed to deliver alert to admin", "error", err)
+		}
+	}
+	if a.cmd != "" {
+		go func() {
+			c := exec.Command("sh", "-c", a.cmd)
+			c.Env = append(os.Environ(), "ALERT_CATEGORY="+category, "ALERT_MESSAGE="+text)
+			if out, err := c.CombinedOutput(); err != nil {
+				a.logger.Error("alert command failed", "error", err, "output", string(out))
+			}
+		}()
 	}
 }
