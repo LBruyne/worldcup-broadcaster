@@ -133,6 +133,7 @@ needs 可选值（按需多选，无需数据时为空数组）：
 - "leaderboards"：射手榜/助攻榜
 - "today"：今明两天的比赛
 - "match:队名或'当前'"：某场【世界杯】比赛的现场详情——首发阵容/阵型/换人/进球过程/比赛事件（问"这场/本场比赛"用"match:当前"；问到具体球队的某场用"match:队名"）
+- "player:球员正式英文名"：问任何球员的赛季数据/俱乐部表现/生涯数据时【必填】（外号转正式英文名：B费→Bruno Fernandes），会返回ESPN官方的逐赛季统计
 search：以下情况【必须】填搜索关键词：问题涉及任何具体球员（含外号：B费、丁丁、拉师傅等都是球员）或球队的数据/近况/表现/成绩/评价/比较/排名/逐场明细，或本届世界杯数据之外的足球事实（历史战绩、转会、伤病、俱乐部赛事等）。"XX表现怎么样""谁成绩好"这类评价比较类问题也是事实数据问题，必须搜索。可以给最多2个查询（用|分隔），中英文各一个效果最好，外号要换成正式名字（B费→Bruno Fernandes）；英文查询必须是【纯英文】（人名球队赛事全部用英文，不得夹任何中文字符）。纯闲聊/对线/观点类问题才留空。
 搜索词里的相对时间必须先换算成具体赛季再写入：欧洲联赛赛季从每年8月跨到次年5月，按给出的"今天"换算（例：今天是2026年6月，刚结束的"上赛季/本赛季"=2025-26赛季，再往前一年才是2024-25）。涉及赛季数据时，搜索词必须同时含球员/球队名、换算后的具体赛季（如"2025-26"）、联赛或赛事名、指标名（进球/助攻等）。
 difficulty：涉及具体球员/球队事实数据的问题、需要多步推理/复杂分析/出线概率计算的，一律 hard；纯闲聊对线为 easy。`
@@ -179,6 +180,7 @@ func (h *Handler) route(ctx context.Context, question string) routeResult {
 func (h *Handler) grounding(ctx context.Context, question string) (string, bool) {
 	r := h.route(ctx, question)
 	data := map[string]any{}
+	playerStats := map[string]any{} // structured ESPN data also fed to the verifier
 	for _, need := range r.Needs {
 		switch {
 		case need == "schedule":
@@ -203,6 +205,12 @@ func (h *Handler) grounding(ctx context.Context, question string) (string, bool)
 			ref := strings.TrimPrefix(need, "match:")
 			if detail := h.matchDetail(ctx, ref); detail != nil {
 				data["比赛详情（"+ref+"）"] = detail
+			}
+		case strings.HasPrefix(need, "player:"):
+			name := strings.TrimSpace(strings.TrimPrefix(need, "player:"))
+			if stats := h.playerSeasonStats(ctx, name); stats != nil {
+				data["ESPN官方球员逐赛季统计（"+name+"）"] = stats
+				playerStats["ESPN官方球员逐赛季统计（"+name+"，最权威来源，数字直接采用）"] = stats
 			}
 		}
 	}
@@ -257,6 +265,9 @@ func (h *Handler) grounding(ctx context.Context, question string) (string, bool)
 		// run the deep-thinking fact verifier, which reads actual source
 		// pages and adjudicates a single answer.
 		r.Difficulty = "hard"
+		for k, v := range playerStats {
+			evidence[k] = v
+		}
 		verdict = h.verifyFacts(ctx, question, evidence)
 		if verdict != "" {
 			data["数据核实结论"] = verdict
@@ -354,6 +365,49 @@ func (h *Handler) matchDetail(ctx context.Context, ref string) map[string]any {
 		detail["比赛事件"] = events
 	}
 	return detail
+}
+
+// statCN maps ESPN athlete stat names to Chinese labels.
+var statCN = map[string]string{
+	"STRT": "首发", "G": "进球", "A": "助攻", "SHOT": "射门", "SOG": "射正",
+	"YC": "黄牌", "RC": "红牌", "FC": "犯规", "FA": "被犯规", "OF": "越位",
+	"APP": "出场", "SV": "扑救", "GA": "失球",
+}
+
+// playerSeasonStats resolves a player by English name via ESPN search and
+// returns their per-season statistic rows with Chinese labels.
+func (h *Handler) playerSeasonStats(ctx context.Context, name string) []map[string]any {
+	if name == "" {
+		return nil
+	}
+	athletes, err := h.espn.SearchAthletes(ctx, name)
+	if err != nil || len(athletes) == 0 {
+		h.logger.Warn("athlete search failed", "name", name, "error", err)
+		return nil
+	}
+	a := athletes[0]
+	rows, err := h.espn.AthleteSeasonStats(ctx, a.ID, "")
+	if err != nil || len(rows) == 0 {
+		h.logger.Warn("athlete stats fetch failed", "name", name, "id", a.ID, "error", err)
+		return nil
+	}
+	if len(rows) > 6 {
+		rows = rows[:6] // recent seasons are what chat questions ask about
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, r := range rows {
+		stats := map[string]string{}
+		for k, v := range r.Stats {
+			if cn, ok := statCN[k]; ok {
+				stats[cn] = v
+			} else {
+				stats[k] = v
+			}
+		}
+		out = append(out, map[string]any{"赛季": r.Season, "球队": r.Team, "数据": stats})
+	}
+	h.logger.Info("player season stats grounded", "name", name, "player", a.DisplayName, "seasons", len(out))
+	return out
 }
 
 // keyMatchStats is the curated, ordered subset of ESPN boxscore statistics

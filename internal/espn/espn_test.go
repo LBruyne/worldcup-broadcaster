@@ -166,3 +166,24 @@ func TestClientRetriesAndFakeServer(t *testing.T) {
 		t.Errorf("calls = %d, want 2 (one retry)", calls.Load())
 	}
 }
+
+func TestParseAthleteStats(t *testing.T) {
+	body, err := os.ReadFile("../../testdata/athlete-stats-haaland.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := parseAthleteStats(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) == 0 {
+		t.Fatal("no rows")
+	}
+	r0 := rows[0]
+	if r0.Season != "2025-26 English Premier League" || r0.Team != "Manchester City" {
+		t.Errorf("row0 = %s / %s", r0.Season, r0.Team)
+	}
+	if r0.Stats["G"] != "27" || r0.Stats["A"] != "8" {
+		t.Errorf("row0 stats = %v", r0.Stats)
+	}
+}
