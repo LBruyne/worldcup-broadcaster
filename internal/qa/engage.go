@@ -24,14 +24,28 @@ func (h *Handler) maybeEngage(ctx context.Context, groupID int64, nickname, text
 	busy := h.engageBusy[groupID]
 	h.mu.Unlock()
 
+	// In assistant mode the bot is deliberately quiet: proactive
+	// interjections are rare and the prompt only allows data corrections.
+	prob := h.opts.EngageProb
+	if h.personaMode(groupID) == ModeAssistant {
+		prob *= 0.2
+	}
 	mode := ""
 	switch {
 	case addressesBot(text):
 		mode = "called" // named directly: always evaluate
 	case sinceBot < h.opts.FollowupWindow:
 		mode = "followup"
-	case sinceEngage > h.opts.EngageCooldown && h.randFloat() < h.opts.EngageProb:
+	case sinceEngage > h.opts.EngageCooldown && h.randFloat() < prob:
 		mode = "proactive"
+	}
+	// While muted in this group every send fails anyway — stay silent
+	// instead of hammering the API (and burning LLM calls).
+	if mode != "" {
+		if mc, ok := h.sender.(muteChecker); ok && mc.Muted(groupID) {
+			h.logger.Info("engage skipped (muted in group)", "mode", mode, "group", groupID)
+			return
+		}
 	}
 	if mode == "" || busy {
 		if mode != "" {
@@ -84,9 +98,9 @@ func (h *Handler) maybeEngage(ctx context.Context, groupID int64, nickname, text
 	defer cancel()
 	var out string
 	if tl, ok := h.llm.(ThinkingLLM); ok {
-		out, err = tl.GenerateThink(cctx, engageSystemPrompt, string(payload), think)
+		out, err = tl.GenerateThink(cctx, h.engagePrompt(groupID), string(payload), think)
 	} else {
-		out, err = h.llm.Generate(cctx, engageSystemPrompt, string(payload))
+		out, err = h.llm.Generate(cctx, h.engagePrompt(groupID), string(payload))
 	}
 	if err != nil {
 		h.logger.Error("engage llm failed", "error", err)

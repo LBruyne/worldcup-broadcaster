@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -30,6 +31,11 @@ type Client struct {
 
 	queue chan groupMsg
 	ctx   context.Context // set by Start; bounds in-flight HTTP on shutdown
+
+	// mutedUntil tracks groups where sends recently failed with QQ result
+	// 120 (bot muted / restricted): callers can check Muted to back off.
+	mutedMu    sync.Mutex
+	mutedUntil map[int64]time.Time
 	// OnSendError, when set, is invoked for every failed group send so the
 	// alerter can notify the admin.
 	OnSendError func(error)
@@ -46,8 +52,24 @@ func New(baseURL, token string, groupIDs []int64, interval time.Duration, logger
 		logger: logger,
 		// Sized for a worst-case burst: a restart during several concurrent
 		// live matches can diff hundreds of events at once.
-		queue: make(chan groupMsg, 1024),
+		queue:      make(chan groupMsg, 1024),
+		mutedUntil: make(map[int64]time.Time),
 	}
+}
+
+// Muted reports whether sends to a group recently failed with QQ's "muted"
+// error (result 120). Cleared automatically after the backoff window.
+func (c *Client) Muted(groupID int64) bool {
+	c.mutedMu.Lock()
+	defer c.mutedMu.Unlock()
+	return time.Now().Before(c.mutedUntil[groupID])
+}
+
+func (c *Client) markMuted(groupID int64, d time.Duration) {
+	c.mutedMu.Lock()
+	c.mutedUntil[groupID] = time.Now().Add(d)
+	c.mutedMu.Unlock()
+	c.logger.Warn("group send rejected (likely muted), backing off", "group", groupID, "backoff", d)
 }
 
 // Start launches the queue consumer; it drains until ctx is cancelled.
@@ -79,6 +101,9 @@ func (c *Client) Start(ctx context.Context) {
 						err = nil
 					}
 					if err != nil {
+						if strings.Contains(err.Error(), `"result": 120`) {
+							c.markMuted(msg.groupID, 10*time.Minute)
+						}
 						c.logger.Error("send group message failed", "error", err)
 						if c.OnSendError != nil {
 							// Off the consumer goroutine: an alert (private msg

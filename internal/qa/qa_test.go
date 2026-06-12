@@ -124,7 +124,7 @@ func TestHelp(t *testing.T) {
 	h, sender := newHandler(t, nil)
 	h.OnGroupMessage(context.Background(), 861376113, 0, "小明", "/help")
 	got := sender.last(t)
-	for _, want := range []string{"罗哥1号迷弟", "/ask", "/积分榜", "/射手榜", "/晋级", "今晚几个"} {
+	for _, want := range []string{"世界杯小助手", "/ask", "/积分榜", "/射手榜", "/晋级", "/tone"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("help missing %q\n%s", want, got)
 		}
@@ -157,8 +157,32 @@ func TestAskUsesContextAndData(t *testing.T) {
 			t.Errorf("llm payload missing %q", want)
 		}
 	}
-	if !strings.Contains(llm.gotSys, "罗哥1号迷弟") || !strings.Contains(llm.gotSys, "克里斯蒂亚诺") {
-		t.Errorf("persona prompt missing identity:\n%s", llm.gotSys)
+	// default persona is the rigorous assistant
+	if !strings.Contains(llm.gotSys, "世界杯小助手") || strings.Contains(llm.gotSys, "罗哥1号迷弟") {
+		t.Errorf("default persona should be assistant:\n%.200s", llm.gotSys)
+	}
+}
+
+// /tone 嘴臭 switches the group to the spicy persona; /tone 重置 restores
+// the assistant default.
+func TestToneModeSwitch(t *testing.T) {
+	llm := &fakeLLM{reply: "ok"}
+	h, sender := newHandler(t, llm)
+	ctx := context.Background()
+	h.OnGroupMessage(ctx, 861376113, 0, "小明", "/tone 嘴臭")
+	if got := sender.last(t); !strings.Contains(got, "嘴臭") {
+		t.Fatalf("switch reply = %s", got)
+	}
+	h.OnGroupMessage(ctx, 861376113, 0, "小明", "/ask 你是谁")
+	deadlineWait(t, sender, 2)
+	if !strings.Contains(llm.gotSys, "罗哥1号迷弟") {
+		t.Errorf("spicy persona not active:\n%.200s", llm.gotSys)
+	}
+	h.OnGroupMessage(ctx, 861376113, 0, "小明", "/tone 重置")
+	h.OnGroupMessage(ctx, 861376113, 0, "小明", "/ask 你是谁")
+	deadlineWait(t, sender, 4)
+	if !strings.Contains(llm.gotSys, "世界杯小助手") {
+		t.Errorf("reset did not restore assistant:\n%.200s", llm.gotSys)
 	}
 }
 
@@ -295,7 +319,7 @@ func TestAskCarriesGroupName(t *testing.T) {
 	if !strings.Contains(llm.gotUser, "示例群") {
 		t.Errorf("group name missing from payload: %.200s", llm.gotUser)
 	}
-	if !strings.Contains(llm.gotSys, "示例群") {
+	if !strings.Contains(llm.gotSys, "本群群名") {
 		t.Error("persona prompt missing group-name rule")
 	}
 }
@@ -373,8 +397,8 @@ func TestEngageProactiveProbability(t *testing.T) {
 	if !strings.Contains(llm.gotUser, "proactive") {
 		t.Errorf("mode missing: %.200s", llm.gotUser)
 	}
-	// seed personas must ride along
-	if !strings.Contains(llm.gotSys, "梅罗话题的打法") {
+	// the assistant persona (default) must ride along
+	if !strings.Contains(llm.gotSys, "参与纪律") {
 		t.Error("persona core missing from engage prompt")
 	}
 
@@ -416,9 +440,10 @@ func TestAskCarriesPersonas(t *testing.T) {
 	llm := &fakeLLM{reply: "ok"}
 	h, sender := newHandler(t, llm)
 	ctx := context.Background()
+	h.OnGroupMessage(ctx, 861376113, 0, "铁哥", "/tone 嘴臭")
 	h.OnGroupMessage(ctx, 861376113, 0, "铁哥", "数据才是硬道理")
 	h.OnGroupMessage(ctx, 861376113, 0, "铁哥", "/ask C罗是不是史上最佳")
-	deadlineWait(t, sender, 1)
+	deadlineWait(t, sender, 2)
 	if !strings.Contains(llm.gotUser, "数据决定一切") {
 		t.Errorf("asker persona missing: %.300s", llm.gotUser)
 	}
@@ -522,8 +547,16 @@ func (b *blockingLLM) Generate(ctx context.Context, _, _ string) (string, error)
 
 func TestPersonaCoreSafetyRedline(t *testing.T) {
 	for _, want := range []string{"严禁", "身体", "职业"} {
-		if !strings.Contains(personaCore, want) {
-			t.Errorf("persona core missing safety rule %q", want)
+		if !strings.Contains(spicyCore, want) {
+			t.Errorf("spicy core missing safety rule %q", want)
+		}
+	}
+	// both personas must carry the data discipline and politics redline
+	for _, core := range []string{spicyCore, assistantCore} {
+		for _, want := range []string{"数据纪律", "涉政红线", "专业问题"} {
+			if !strings.Contains(core, want) {
+				t.Errorf("persona missing %q", want)
+			}
 		}
 	}
 }
@@ -535,7 +568,7 @@ func TestToneCommand(t *testing.T) {
 
 	// initial: nothing set
 	h.OnGroupMessage(ctx, 861376113, 0, "小明", "/tone")
-	if got := sender.last(t); !strings.Contains(got, "没有特别的语气设定") {
+	if got := sender.last(t); !strings.Contains(got, "当前语气模式：助手") {
 		t.Errorf("empty tone = %s", got)
 	}
 	// first set: stored verbatim (no merge needed)
@@ -608,7 +641,7 @@ func TestCalledByNameAlwaysEvaluates(t *testing.T) {
 }
 
 func TestPoliticsRedlineInPrompts(t *testing.T) {
-	if !strings.Contains(personaCore, "涉政红线") || !strings.Contains(engageSystemPrompt, "called") {
+	if !strings.Contains(assistantCore, "涉政红线") || !strings.Contains(engageSuffix, "called") {
 		t.Error("politics redline / called mode missing from prompts")
 	}
 }

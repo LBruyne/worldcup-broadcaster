@@ -117,16 +117,19 @@ func TestWatchReplaysFullMatch(t *testing.T) {
 	}
 
 	msgs := sender.all()
-	// 37 key events + 8 shootout rounds = 45 broadcasts
-	if len(msgs) != 45 {
-		t.Fatalf("messages = %d, want 45\nfirst: %s", len(msgs), msgs[0])
+	// lineups + 37 key events + 8 shootout rounds = 46 broadcasts
+	if len(msgs) != 46 {
+		t.Fatalf("messages = %d, want 46\nfirst: %s", len(msgs), msgs[0])
 	}
-	if !strings.Contains(msgs[0], "比赛开始") {
+	if !strings.Contains(msgs[0], "首发阵容") || !strings.Contains(msgs[0], "Lionel Messi") {
 		t.Errorf("msg0 = %s", msgs[0])
 	}
-	// Messi's 23' penalty must carry the 1:0 scoreline from its own text.
-	if !strings.Contains(msgs[1], "点球命中") || !strings.Contains(msgs[1], "1 : 0") {
+	if !strings.Contains(msgs[1], "比赛开始") {
 		t.Errorf("msg1 = %s", msgs[1])
+	}
+	// Messi's 23' penalty must carry the 1:0 scoreline from its own text.
+	if !strings.Contains(msgs[2], "点球命中") || !strings.Contains(msgs[2], "1 : 0") {
+		t.Errorf("msg2 = %s", msgs[2])
 	}
 	last := msgs[len(msgs)-1]
 	if !strings.Contains(last, "全场结束") || !strings.Contains(last, "点球 4:2") || !strings.Contains(last, "今晚几个") {
@@ -160,6 +163,7 @@ func TestWatchRestartDoesNotRepush(t *testing.T) {
 	}
 
 	first := run()
+	// post-state catch-up run: no lineups (they only go out while live)
 	if len(first) != 45 {
 		t.Fatalf("first run = %d, want 45", len(first))
 	}

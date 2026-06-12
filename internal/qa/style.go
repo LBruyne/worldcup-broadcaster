@@ -13,6 +13,7 @@ import (
 type groupStyle struct {
 	StyleDesc string    `json:"style_desc"` // learned from chat
 	Tone      string    `json:"tone"`       // member-requested directives
+	Mode      string    `json:"mode"`       // persona mode: 助手 (default) | 嘴臭
 	MsgCount  int       `json:"msg_count"`  // messages since last style refresh
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -107,32 +108,47 @@ func (h *Handler) observeStyle(ctx context.Context, groupID int64) {
 	}()
 }
 
-// cmdTone handles "/tone [要求|重置]".
+// cmdTone handles "/tone [模式|要求|重置]": switch between persona modes
+// (助手/嘴臭), reset, or merge a free-form tone directive.
 func (h *Handler) cmdTone(ctx context.Context, groupID int64, nickname, arg string) string {
 	st := h.loadStyle(groupID)
 	arg = strings.TrimSpace(arg)
 	switch arg {
 	case "":
 		h.styleMu.Lock()
-		tone, style := st.Tone, st.StyleDesc
+		tone, style, mode := st.Tone, st.StyleDesc, st.Mode
 		h.styleMu.Unlock()
-		if tone == "" && style == "" {
-			return "🎙️ 当前没有特别的语气设定。用法：/tone 你的要求（如：说话再损一点/少用表情）；/tone 重置"
+		if mode == "" {
+			mode = ModeAssistant
 		}
-		out := "🎙️ 当前语气设定：\n"
+		out := "🎙️ 当前语气模式：" + mode + "（可选：/tone 助手｜/tone 嘴臭）\n"
 		if tone != "" {
-			out += "群友要求：" + tone + "\n"
+			out += "群友自定义要求：" + tone + "\n"
 		}
 		if style != "" {
-			out += "学到的群风格：" + style
+			out += "学到的群风格：" + style + "\n"
 		}
+		out += "自定义：/tone 你的要求（如：少用表情）；/tone 重置 恢复默认"
 		return strings.TrimRight(out, "\n")
+	case ModeAssistant, "小助手", "assistant", "正经":
+		h.styleMu.Lock()
+		st.Mode = ModeAssistant
+		h.styleMu.Unlock()
+		h.persistStyle(groupID)
+		return "✅ 已切换为小助手模式：严谨、准确、有问必答，不打扰大家"
+	case ModeSpicy, "老哥", "整活", "spicy":
+		h.styleMu.Lock()
+		st.Mode = ModeSpicy
+		h.styleMu.Unlock()
+		h.persistStyle(groupID)
+		return "🐶 嘴臭老哥模式已上线，罗哥迷弟回来了"
 	case "重置", "reset":
 		h.styleMu.Lock()
 		st.Tone = ""
+		st.Mode = ModeAssistant
 		h.styleMu.Unlock()
 		h.persistStyle(groupID)
-		return "🎙️ 语气已重置，恢复出厂嘴臭"
+		return "🎙️ 已重置：小助手模式，自定义语气要求已清空"
 	}
 
 	h.styleMu.Lock()

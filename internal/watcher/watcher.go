@@ -105,6 +105,18 @@ func (w *Watcher) Watch(ctx context.Context, ev espn.Event) error {
 // processSnapshot diffs, renders, enqueues and persists. Returns true when
 // the match reached a terminal state and the final whistle was broadcast.
 func (w *Watcher) processSnapshot(matchID, date string, sum *espn.Summary, raw []byte, log *slog.Logger) bool {
+	// Starting lineups go out once, when the match goes live (kickoff
+	// switch governs them, like the kickoff message itself).
+	if liveSt, _, _ := sum.Live(); liveSt.Type.State == "in" &&
+		w.opts.Events.Kickoff && len(sum.Rosters) > 0 && !w.store.IsPushed(matchID, "lineups") {
+		if msg := RenderLineups(sum); msg != "" {
+			log.Info("broadcasting lineups", "teams", len(sum.Rosters))
+			w.sender.EnqueueGroup(msg)
+		}
+		if err := w.store.MarkPushed(matchID, "lineups"); err != nil {
+			log.Error("persist pushed state failed", "error", err)
+		}
+	}
 	events := Diff(sum, func(key string) bool { return w.store.IsPushed(matchID, key) })
 	for _, e := range events {
 		if Enabled(e.Type, w.opts.Events) {
