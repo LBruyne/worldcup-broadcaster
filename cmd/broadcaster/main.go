@@ -27,6 +27,7 @@ import (
 	"worldcup-broadcaster/internal/espn"
 	"worldcup-broadcaster/internal/llm"
 	"worldcup-broadcaster/internal/onebot"
+	"worldcup-broadcaster/internal/playername"
 	"worldcup-broadcaster/internal/qa"
 	"worldcup-broadcaster/internal/store"
 	"worldcup-broadcaster/internal/watcher"
@@ -80,6 +81,11 @@ func main() {
 	dig := digest.New(espnClient, llmClient, st, bot, alerter.Alert, logger)
 	w := watcher.New(espnClient, bot, st, alerter.Alert, logger,
 		watcher.DefaultOptions(cfg.Events, time.Duration(cfg.ESPN.PollIntervalSec)*time.Second))
+	if llmClient != nil {
+		names := playername.New(st, llmClient, logger)
+		dig.SetNameTranslator(names)
+		w.SetNameTranslator(names)
+	}
 
 	loc := cfg.Location
 	today := func() string { return time.Now().In(loc).Format("2006-01-02") }

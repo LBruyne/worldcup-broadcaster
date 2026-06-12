@@ -72,11 +72,27 @@ func (d *Digest) Leaderboards(ctx context.Context) (*Boards, error) {
 		}
 	}
 
-	return &Boards{
+	b := &Boards{
 		Scorers: topEntries(goals, 10),
 		Assists: topEntries(assists, 10),
 		Matches: finished,
-	}, nil
+	}
+	// Localise player names once here: every consumer (commands, previews,
+	// recaps, /ask grounding) renders from this struct.
+	if d.names != nil {
+		var all []string
+		for _, e := range append(b.Scorers, b.Assists...) {
+			all = append(all, e.Player)
+		}
+		d.names.EnsureBatch(ctx, all)
+		for i := range b.Scorers {
+			b.Scorers[i].Player = d.names.Name(b.Scorers[i].Player)
+		}
+		for i := range b.Assists {
+			b.Assists[i].Player = d.names.Name(b.Assists[i].Player)
+		}
+	}
+	return b, nil
 }
 
 func (d *Digest) matchGoalsCached(ctx context.Context, ev *espn.Event) (*matchGoals, error) {

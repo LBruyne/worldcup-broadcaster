@@ -9,10 +9,14 @@ import (
 )
 
 // RenderLineups formats both starting XIs (with formation and bench) for the
-// kickoff broadcast. Returns "" when rosters are not published.
-func RenderLineups(sum *espn.Summary) string {
+// kickoff broadcast; nameFn localises player names. Returns "" when rosters
+// are not published.
+func RenderLineups(sum *espn.Summary, nameFn func(string) string) string {
 	if len(sum.Rosters) == 0 {
 		return ""
+	}
+	if nameFn == nil {
+		nameFn = func(s string) string { return s }
 	}
 	_, home, away := sum.Live()
 	var b strings.Builder
@@ -23,13 +27,13 @@ func RenderLineups(sum *espn.Summary) string {
 		var starters, bench []string
 		for _, p := range ros.Roster {
 			if p.Starter {
-				s := p.Jersey + " " + p.Athlete.DisplayName
+				s := p.Jersey + " " + nameFn(p.Athlete.DisplayName)
 				if p.Position.Abbreviation != "" {
 					s += "(" + p.Position.Abbreviation + ")"
 				}
 				starters = append(starters, s)
 			} else {
-				bench = append(bench, p.Athlete.DisplayName)
+				bench = append(bench, nameFn(p.Athlete.DisplayName))
 			}
 		}
 		if len(starters) == 0 {

@@ -12,6 +12,7 @@ import (
 
 	"worldcup-broadcaster/internal/cnmap"
 	"worldcup-broadcaster/internal/espn"
+	"worldcup-broadcaster/internal/playername"
 	"worldcup-broadcaster/internal/store"
 )
 
@@ -30,11 +31,15 @@ type Digest struct {
 	sender Sender
 	alert  func(category, msg string)
 	logger *slog.Logger
+	names  *playername.Translator // optional Chinese player-name localiser
 }
 
 func New(c *espn.Client, l LLM, st *store.Store, s Sender, alertFn func(string, string), logger *slog.Logger) *Digest {
 	return &Digest{espn: c, llm: l, store: st, sender: s, alert: alertFn, logger: logger}
 }
+
+// SetNameTranslator wires the Chinese player-name translator (optional).
+func (d *Digest) SetNameTranslator(t *playername.Translator) { d.names = t }
 
 var cst = time.FixedZone("CST", 8*3600)
 

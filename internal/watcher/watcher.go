@@ -11,6 +11,7 @@ import (
 	"worldcup-broadcaster/internal/config"
 	"worldcup-broadcaster/internal/espn"
 	"worldcup-broadcaster/internal/format"
+	"worldcup-broadcaster/internal/playername"
 	"worldcup-broadcaster/internal/store"
 )
 
@@ -47,12 +48,21 @@ type Watcher struct {
 	// text: they are held back one poll so ESPN can enrich the event
 	// (score sentence, assist) instead of broadcasting a stale snapshot.
 	pendingGoals map[string]bool
+
+	// names translates player names to Chinese for broadcasts (optional).
+	names *playername.Translator
 }
 
 func New(c *espn.Client, s Sender, st *store.Store, alertFn func(string, string), logger *slog.Logger, opts Options) *Watcher {
 	return &Watcher{espn: c, sender: s, store: st, alert: alertFn, logger: logger, opts: opts,
 		pendingGoals: make(map[string]bool)}
 }
+
+// SetNameTranslator wires the Chinese player-name translator (optional).
+func (w *Watcher) SetNameTranslator(t *playername.Translator) { w.names = t }
+
+// playerCN translates one name, falling back to the original.
+func (w *Watcher) playerCN(en string) string { return w.names.Name(en) }
 
 // Watch blocks until the match finishes, ctx is cancelled, or MaxDuration
 // elapses. Safe to call for already-finished matches: events already pushed
@@ -115,7 +125,18 @@ func (w *Watcher) processSnapshot(matchID, date string, sum *espn.Summary, raw [
 	// switch governs them, like the kickoff message itself).
 	if liveSt, _, _ := sum.Live(); liveSt.Type.State == "in" &&
 		w.opts.Events.Kickoff && len(sum.Rosters) > 0 && !w.store.IsPushed(matchID, "lineups") {
-		if msg := RenderLineups(sum); msg != "" {
+		// One batch translation covers the whole squad list, so every
+		// later event render is a pure cache lookup.
+		if w.names != nil {
+			var all []string
+			for _, ros := range sum.Rosters {
+				for _, p := range ros.Roster {
+					all = append(all, p.Athlete.DisplayName)
+				}
+			}
+			w.names.EnsureBatch(context.Background(), all)
+		}
+		if msg := RenderLineups(sum, w.playerCN); msg != "" {
 			log.Info("broadcasting lineups", "teams", len(sum.Rosters))
 			w.sender.EnqueueGroup(msg)
 		}
@@ -136,6 +157,12 @@ func (w *Watcher) processSnapshot(matchID, date string, sum *espn.Summary, raw [
 		}
 		delete(w.pendingGoals, e.Key)
 		if Enabled(e.Type, w.opts.Events) {
+			if w.names != nil {
+				w.names.EnsureBatch(context.Background(),
+					[]string{e.Player, e.Assist, e.SubOut})
+				e.Player, e.Assist, e.SubOut =
+					w.playerCN(e.Player), w.playerCN(e.Assist), w.playerCN(e.SubOut)
+			}
 			msg := Render(e)
 			log.Info("broadcasting event", "type", e.Type, "key", e.Key, "clock", e.Clock)
 			w.sender.EnqueueGroup(msg)
