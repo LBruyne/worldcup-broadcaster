@@ -81,9 +81,24 @@ type Summary struct {
 	Standings       json.RawMessage `json:"standings"`
 	Leaders         json.RawMessage `json:"leaders"`
 	Rosters         []Roster        `json:"rosters"`
+	Boxscore        Boxscore        `json:"boxscore"`
 	GameInfo        struct {
 		Venue Venue `json:"venue"`
 	} `json:"gameInfo"`
+}
+
+// Boxscore carries per-team match statistics (possession, shots, ...).
+type Boxscore struct {
+	Teams []BoxscoreTeam `json:"teams"`
+}
+
+type BoxscoreTeam struct {
+	Team       Team `json:"team"`
+	Statistics []struct {
+		Name         string `json:"name"`
+		Label        string `json:"label"`
+		DisplayValue string `json:"displayValue"`
+	} `json:"statistics"`
 }
 
 // Roster is one team's match-day squad with formation and starters.

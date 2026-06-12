@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"worldcup-broadcaster/internal/cnmap"
+	"worldcup-broadcaster/internal/espn"
 )
 
 // matchRow is one compact schedule entry of the local World Cup database —
@@ -321,6 +322,9 @@ func (h *Handler) matchDetail(ctx context.Context, ref string) map[string]any {
 	if len(lineups) > 0 {
 		detail["首发阵容"] = lineups
 	}
+	if stats := matchStats(sum); len(stats) > 0 {
+		detail["技术统计"] = stats
+	}
 	var events []string
 	for _, e := range sum.KeyEvents {
 		line := e.Clock.DisplayValue + " " + e.Type.Text
@@ -340,6 +344,51 @@ func (h *Handler) matchDetail(ctx context.Context, ref string) map[string]any {
 		detail["比赛事件"] = events
 	}
 	return detail
+}
+
+// keyMatchStats is the curated, ordered subset of ESPN boxscore statistics
+// worth surfacing in chat answers.
+var keyMatchStats = []struct{ key, label string }{
+	{"possessionPct", "控球率%"},
+	{"totalShots", "射门"},
+	{"shotsOnTarget", "射正"},
+	{"wonCorners", "角球"},
+	{"foulsCommitted", "犯规"},
+	{"offsides", "越位"},
+	{"saves", "扑救"},
+	{"yellowCards", "黄牌"},
+	{"redCards", "红牌"},
+}
+
+// matchStats reduces the boxscore to one compact stat line per team.
+func matchStats(sum *espn.Summary) []map[string]any {
+	var out []map[string]any
+	for _, bt := range sum.Boxscore.Teams {
+		vals := map[string]string{}
+		for _, s := range bt.Statistics {
+			vals[s.Name] = s.DisplayValue
+		}
+		if len(vals) == 0 {
+			continue
+		}
+		var list []string
+		for _, ks := range keyMatchStats {
+			if v, ok := vals[ks.key]; ok && v != "" {
+				list = append(list, ks.label+" "+v)
+			}
+		}
+		if vals["accuratePasses"] != "" && vals["totalPasses"] != "" {
+			list = append(list, "传球成功 "+vals["accuratePasses"]+"/"+vals["totalPasses"])
+		}
+		if len(list) == 0 {
+			continue
+		}
+		out = append(out, map[string]any{
+			"球队": cnmap.Name(bt.Team.DisplayName),
+			"统计": list,
+		})
+	}
+	return out
 }
 
 // resolveMatchRef maps a reference to a schedule row: by team name, or for

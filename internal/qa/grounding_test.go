@@ -287,3 +287,22 @@ func TestCalledEngageGetsGrounding(t *testing.T) {
 		t.Errorf("called engage missing grounded match detail: %.300s", llm.askUser)
 	}
 }
+
+// Boxscore stats (possession, shots) must reach the match-detail blob.
+func TestMatchDetailCarriesStats(t *testing.T) {
+	h, _ := newHandler(t, nil)
+	detail := h.matchDetail(context.Background(), "当前")
+	if detail == nil {
+		t.Fatal("no match detail from fixture")
+	}
+	stats, ok := detail["技术统计"].([]map[string]any)
+	if !ok || len(stats) != 2 {
+		t.Fatalf("stats = %#v", detail["技术统计"])
+	}
+	joined := strings.Join(stats[0]["统计"].([]string), " ")
+	for _, want := range []string{"控球率%", "射门", "传球成功"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("stats missing %q: %s", want, joined)
+		}
+	}
+}
