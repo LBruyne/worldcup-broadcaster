@@ -42,10 +42,16 @@ type Watcher struct {
 	alert  func(category, msg string)
 	logger *slog.Logger
 	opts   Options
+
+	// pendingGoals holds goal keys seen once without a parseable score
+	// text: they are held back one poll so ESPN can enrich the event
+	// (score sentence, assist) instead of broadcasting a stale snapshot.
+	pendingGoals map[string]bool
 }
 
 func New(c *espn.Client, s Sender, st *store.Store, alertFn func(string, string), logger *slog.Logger, opts Options) *Watcher {
-	return &Watcher{espn: c, sender: s, store: st, alert: alertFn, logger: logger, opts: opts}
+	return &Watcher{espn: c, sender: s, store: st, alert: alertFn, logger: logger, opts: opts,
+		pendingGoals: make(map[string]bool)}
 }
 
 // Watch blocks until the match finishes, ctx is cancelled, or MaxDuration
@@ -117,8 +123,18 @@ func (w *Watcher) processSnapshot(matchID, date string, sum *espn.Summary, raw [
 			log.Error("persist pushed state failed", "error", err)
 		}
 	}
+	st0, _, _ := sum.Live()
 	events := Diff(sum, func(key string) bool { return w.store.IsPushed(matchID, key) })
 	for _, e := range events {
+		// A live goal without its score sentence is still being enriched
+		// by the feed: hold it one poll so the broadcast carries the right
+		// scoreline (and the assist), not a lagging snapshot.
+		if e.Type == EvGoal && !e.ScoreParsed && st0.Type.State == "in" && !w.pendingGoals[e.Key] {
+			w.pendingGoals[e.Key] = true
+			log.Info("deferring goal one poll for feed enrichment", "key", e.Key, "clock", e.Clock)
+			continue
+		}
+		delete(w.pendingGoals, e.Key)
 		if Enabled(e.Type, w.opts.Events) {
 			msg := Render(e)
 			log.Info("broadcasting event", "type", e.Type, "key", e.Key, "clock", e.Clock)

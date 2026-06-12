@@ -44,6 +44,10 @@ type Event struct {
 	SubOut  string // substitution: player leaving
 	Penalty bool   // goal from a regulation penalty
 	OwnGoal bool
+	// ScoreParsed marks a goal whose scoreline came from its own event text;
+	// false means the (possibly lagging) snapshot score was used and the
+	// feed may still be enriching the event.
+	ScoreParsed bool
 
 	Round  int  // shootout round number
 	Scored bool // shootout attempt result
@@ -203,6 +207,7 @@ func Diff(sum *espn.Summary, isSeen func(key string) bool) []Event {
 			}
 			if h, a, ok := scoreFromText(k.Text, ctx.HomeName, ctx.AwayName); ok {
 				ev.Ctx.HomeScore, ev.Ctx.AwayScore = h, a
+				ev.ScoreParsed = true
 			}
 		case EvSubstitution:
 			if len(k.Participants) > 1 {

@@ -242,3 +242,51 @@ func TestWatchConfigSuppression(t *testing.T) {
 		}
 	}
 }
+
+// A live goal whose event text has no score sentence yet (feed still
+// enriching) is held one poll, then broadcast with whatever is available.
+func TestGoalDeferredForEnrichment(t *testing.T) {
+	bare := []byte(`{
+	  "header":{"competitions":[{"status":{"type":{"state":"in","detail":"68'"}},
+	    "competitors":[
+	      {"homeAway":"home","score":"0","team":{"displayName":"South Korea"}},
+	      {"homeAway":"away","score":"1","team":{"displayName":"Czechia"}}]}]},
+	  "keyEvents":[{"id":"g1","type":{"id":"70","text":"Goal"},"text":"",
+	    "clock":{"displayValue":"67'"},"scoringPlay":true,
+	    "team":{"displayName":"South Korea"},
+	    "participants":[{"athlete":{"displayName":"Hwang In-Beom"}}]}]}`)
+	enriched := []byte(`{
+	  "header":{"competitions":[{"status":{"type":{"state":"in","detail":"68'"}},
+	    "competitors":[
+	      {"homeAway":"home","score":"1","team":{"displayName":"South Korea"}},
+	      {"homeAway":"away","score":"1","team":{"displayName":"Czechia"}}]}]},
+	  "keyEvents":[{"id":"g1","type":{"id":"70","text":"Goal"},
+	    "text":"Goal! Korea Republic 1, Czechia 1. Hwang In-Beom (Korea Republic) right footed shot. Assisted by Lee Kang-In.",
+	    "clock":{"displayValue":"67'"},"scoringPlay":true,
+	    "team":{"displayName":"South Korea"},
+	    "participants":[{"athlete":{"displayName":"Hwang In-Beom"}},{"athlete":{"displayName":"Lee Kang-In"}}]}]}`)
+
+	var s1, s2 espn.Summary
+	if err := json.Unmarshal(bare, &s1); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(enriched, &s2); err != nil {
+		t.Fatal(err)
+	}
+	sender := &fakeSender{}
+	w := New(nil, sender, store.New(t.TempDir()), func(string, string) {}, slog.Default(),
+		Options{Events: allEvents()})
+
+	w.processSnapshot("m1", "2026-06-12", &s1, bare, slog.Default())
+	if got := sender.all(); len(got) != 0 {
+		t.Fatalf("bare goal must be deferred, got %q", got)
+	}
+	w.processSnapshot("m1", "2026-06-12", &s2, enriched, slog.Default())
+	got := sender.all()
+	if len(got) != 1 {
+		t.Fatalf("enriched goal not broadcast: %d msgs", len(got))
+	}
+	if !strings.Contains(got[0], "1 : 1") || !strings.Contains(got[0], "Lee Kang-In") {
+		t.Errorf("msg = %s", got[0])
+	}
+}
