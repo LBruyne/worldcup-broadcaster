@@ -31,6 +31,10 @@ type OneBot struct {
 	// ALERT_CATEGORY / ALERT_MESSAGE env vars — a fallback channel
 	// (Telegram/Server酱/webhook) that works while QQ itself is down.
 	AlertCmd string `yaml:"alert_cmd"`
+	// QRSyncCmd runs (sh -c) on every keepalive probe while QQ is logged
+	// out, keeping the latest login QR code at a stable path for instant
+	// scanning. Empty disables.
+	QRSyncCmd string `yaml:"qr_sync_cmd"`
 	// WebUIURL is NapCat's WebUI address, used as a liveness probe: when QQ
 	// is offline but the WebUI still answers, NapCat is alive and merely
 	// waiting for a manual login — restarting would only invalidate the QR
@@ -50,6 +54,10 @@ type QA struct {
 	FollowupWindowSec int     `yaml:"followup_window_sec"`
 	// SeedPersonas are initial member personas keyed by nickname.
 	SeedPersonas map[string]string `yaml:"seed_personas"`
+	// ReplyGapSec is the minimum gap between the bot's conversational
+	// replies in one group (QA answers, interjections). Replies queue and
+	// drain at this pace; 0 disables pacing. Broadcasts are unaffected.
+	ReplyGapSec int `yaml:"reply_gap_sec"`
 }
 
 type ESPN struct {
@@ -121,6 +129,7 @@ func defaults() *Config {
 			EngageProbability: 0.15,
 			EngageCooldownMin: 4,
 			FollowupWindowSec: 180,
+			ReplyGapSec:       15,
 		},
 		ESPN: ESPN{
 			League:          "fifa.world",

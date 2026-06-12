@@ -145,6 +145,7 @@ func main() {
 			EngageProb:     cfg.QA.EngageProbability,
 			EngageCooldown: time.Duration(cfg.QA.EngageCooldownMin) * time.Minute,
 			FollowupWindow: time.Duration(cfg.QA.FollowupWindowSec) * time.Second,
+			ReplyGap:       time.Duration(cfg.QA.ReplyGapSec) * time.Second,
 			SeedPersonas:   cfg.QA.SeedPersonas,
 		}, bot, qaLLM, dig, espnClient, st, logger)
 		qaHandler.SetMemberLister(bot)
@@ -194,6 +195,16 @@ func qqKeepalive(ctx context.Context, cfg *config.Config, bot *onebot.Client, al
 	defer ticker.Stop()
 	var lastRestart time.Time
 	consecutive := 0
+	reconnectTried := false // one automatic relogin attempt per outage
+	runCmd := func(name, cmd string) {
+		logger.Warn("executing "+name, "cmd", cmd)
+		out, err := exec.CommandContext(ctx, "sh", "-c", cmd).CombinedOutput()
+		if err != nil {
+			logger.Error(name+" failed", "error", err, "output", string(out))
+		} else {
+			logger.Info(name+" executed", "output", string(out))
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -206,6 +217,7 @@ func qqKeepalive(ctx context.Context, cfg *config.Config, bot *onebot.Client, al
 				logger.Info("qq back online", "after_failures", consecutive)
 			}
 			consecutive = 0
+			reconnectTried = false
 			continue
 		}
 		consecutive++
@@ -214,24 +226,31 @@ func qqKeepalive(ctx context.Context, cfg *config.Config, bot *onebot.Client, al
 			continue // a single blip (e.g. napcat restarting) is not an outage
 		}
 		if napcatAlive(cfg.OneBot.WebUIURL) {
-			// NapCat itself is up but QQ is not logged in. A container
-			// restart cannot fix an invalidated session (quick login already
-			// failed at boot) and would kill any QR code mid-scan, so leave
-			// it running and page the admin instead.
-			logger.Warn("napcat alive but qq offline; awaiting manual login, skipping restart", "consecutive", consecutive)
-			alerter.Alert("qq-login", fmt.Sprintf("QQ不在线但NapCat存活（连续%d次探测失败）：疑似登录态失效，需要人工扫码重新登录，已暂停自动重启以保护二维码", consecutive))
+			// NapCat is up but QQ is logged out. Try ONE automatic restart
+			// per outage: it re-attempts quick login and rescues soft kicks
+			// without a human. If the session is hard-invalidated the
+			// restart lands on the QR screen — never restart again after
+			// that (it would void the QR mid-scan); keep the latest QR
+			// synced to a stable path and page the admin instead.
+			if !reconnectTried && cfg.OneBot.RestartCmd != "" {
+				reconnectTried = true
+				lastRestart = time.Now()
+				alerter.Alert("qq-login", fmt.Sprintf("QQ掉线（连续%d次探测失败），自动重启NapCat尝试重连…", consecutive))
+				runCmd("auto-reconnect restart", cfg.OneBot.RestartCmd)
+				continue
+			}
+			if cfg.OneBot.QRSyncCmd != "" {
+				runCmd("qr sync", cfg.OneBot.QRSyncCmd)
+			}
+			logger.Warn("napcat alive but qq offline; awaiting manual login", "consecutive", consecutive)
+			alerter.Alert("qq-login", fmt.Sprintf(
+				"QQ登录态失效（连续%d次探测失败），自动重连无效，需要人工扫码：最新二维码已同步到 qrcode-login.png，或打开 NapCat WebUI 扫码", consecutive))
 			continue
 		}
 		alerter.Alert("qq-online", fmt.Sprintf("QQ疑似掉线（连续%d次探测失败，err=%v），尝试自动重启 NapCat", consecutive, err))
 		if cfg.OneBot.RestartCmd != "" && time.Since(lastRestart) > 20*time.Minute {
 			lastRestart = time.Now()
-			logger.Warn("executing restart command", "cmd", cfg.OneBot.RestartCmd)
-			out, cmdErr := exec.CommandContext(ctx, "sh", "-c", cfg.OneBot.RestartCmd).CombinedOutput()
-			if cmdErr != nil {
-				logger.Error("restart command failed", "error", cmdErr, "output", string(out))
-			} else {
-				logger.Info("restart command executed", "output", string(out))
-			}
+			runCmd("restart command", cfg.OneBot.RestartCmd)
 		}
 	}
 }

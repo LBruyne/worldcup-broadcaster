@@ -64,6 +64,7 @@ type Options struct {
 	EngageProb     float64       // probability of proactively joining a topic
 	EngageCooldown time.Duration // min gap between proactive interjections
 	FollowupWindow time.Duration // window after bot spoke to judge follow-ups
+	ReplyGap       time.Duration // min gap between replies per group (0 = off)
 	SeedPersonas   map[string]string
 }
 
@@ -85,6 +86,8 @@ type Handler struct {
 	lastBotMsg map[int64]time.Time // last conversational reply per group
 	lastEngage map[int64]time.Time // last proactive interjection per group
 	engageBusy map[int64]bool      // single-flight engagement per group
+	replyQ     map[int64]chan string
+	ctx        context.Context // set by Start; bounds reply workers
 
 	styleMu   sync.Mutex
 	styles    map[int64]*groupStyle // learned group voice + /tone directives
@@ -133,6 +136,7 @@ func NewHandler(opts Options, sender Sender, llm LLM, dig *digest.Digest, client
 		lastBotMsg: make(map[int64]time.Time),
 		lastEngage: make(map[int64]time.Time),
 		engageBusy: make(map[int64]bool),
+		replyQ:     make(map[int64]chan string),
 		styles:     make(map[int64]*groupStyle),
 		styleBusy:  make(map[int64]bool),
 		askQueue:   make(chan askTask, 16),
@@ -142,6 +146,7 @@ func NewHandler(opts Options, sender Sender, llm LLM, dig *digest.Digest, client
 // Start launches the ask worker; questions queue up and are answered one by
 // one. Must be called once before serving events.
 func (h *Handler) Start(ctx context.Context) {
+	h.ctx = ctx
 	go func() {
 		for {
 			select {
@@ -272,10 +277,50 @@ func (h *Handler) OnGroupMessage(ctx context.Context, groupID, userID int64, nic
 	}
 }
 
+// reply queues a conversational message; per-group workers drain the queue
+// with a minimum gap so the bot never machine-guns a group (broadcasts take
+// the direct path and are unaffected).
 func (h *Handler) reply(groupID int64, msg string) {
 	if strings.TrimSpace(msg) == "" {
 		return
 	}
+	if h.opts.ReplyGap <= 0 || h.ctx == nil {
+		h.deliver(groupID, msg)
+		return
+	}
+	h.mu.Lock()
+	ch, ok := h.replyQ[groupID]
+	if !ok {
+		ch = make(chan string, 8)
+		h.replyQ[groupID] = ch
+		go h.replyWorker(h.ctx, groupID, ch)
+	}
+	h.mu.Unlock()
+	select {
+	case ch <- msg:
+	default:
+		h.logger.Warn("reply queue full, dropping reply", "group", groupID)
+	}
+}
+
+func (h *Handler) replyWorker(ctx context.Context, groupID int64, ch chan string) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg := <-ch:
+			h.deliver(groupID, msg)
+			select {
+			case <-time.After(h.opts.ReplyGap):
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
+}
+
+// deliver performs the actual send plus conversational bookkeeping.
+func (h *Handler) deliver(groupID int64, msg string) {
 	h.sender.EnqueueGroupTo(groupID, msg)
 	// Our own words go into the context so follow-up judging sees them.
 	h.remember(groupID, BotName, msg)

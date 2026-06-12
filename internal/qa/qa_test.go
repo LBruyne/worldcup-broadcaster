@@ -672,3 +672,24 @@ func TestSelfReviewLoop(t *testing.T) {
 		t.Errorf("reflection missing from ask payload: %.300s", llm.gotUser)
 	}
 }
+
+// With ReplyGap set, replies queue per group and drain at the configured
+// pace instead of machine-gunning the group.
+func TestReplyGapPacing(t *testing.T) {
+	llm := &fakeLLM{reply: "ok"}
+	h, sender := newHandler(t, llm)
+	h.opts.ReplyGap = 80 * time.Millisecond
+	h.reply(861376113, "第一条")
+	h.reply(861376113, "第二条")
+	deadlineWait(t, sender, 1)
+	if n := sender.count(); n != 1 {
+		t.Fatalf("immediately after: %d msgs, want 1 (second must wait)", n)
+	}
+	deadlineWait(t, sender, 2)
+	if n := sender.count(); n != 2 {
+		t.Fatalf("after gap: %d msgs, want 2", n)
+	}
+	if got := sender.last(t); got != "第二条" {
+		t.Errorf("order broken: %s", got)
+	}
+}
