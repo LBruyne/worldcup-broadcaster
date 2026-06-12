@@ -133,7 +133,7 @@ needs 可选值（按需多选，无需数据时为空数组）：
 - "leaderboards"：射手榜/助攻榜
 - "today"：今明两天的比赛
 - "match:队名或'当前'"：某场【世界杯】比赛的现场详情——首发阵容/阵型/换人/进球过程/比赛事件（问"这场/本场比赛"用"match:当前"；问到具体球队的某场用"match:队名"）
-search：以下情况【必须】填搜索关键词：问题涉及任何具体球员（含外号：B费、丁丁、拉师傅等都是球员）或球队的数据/近况/表现/成绩/评价/比较/排名/逐场明细，或本届世界杯数据之外的足球事实（历史战绩、转会、伤病、俱乐部赛事等）。"XX表现怎么样""谁成绩好"这类评价比较类问题也是事实数据问题，必须搜索。可以给最多2个查询（用|分隔），中英文各一个效果最好，外号要换成正式名字（B费→Bruno Fernandes）。纯闲聊/对线/观点类问题才留空。
+search：以下情况【必须】填搜索关键词：问题涉及任何具体球员（含外号：B费、丁丁、拉师傅等都是球员）或球队的数据/近况/表现/成绩/评价/比较/排名/逐场明细，或本届世界杯数据之外的足球事实（历史战绩、转会、伤病、俱乐部赛事等）。"XX表现怎么样""谁成绩好"这类评价比较类问题也是事实数据问题，必须搜索。可以给最多2个查询（用|分隔），中英文各一个效果最好，外号要换成正式名字（B费→Bruno Fernandes）；英文查询必须是【纯英文】（人名球队赛事全部用英文，不得夹任何中文字符）。纯闲聊/对线/观点类问题才留空。
 搜索词里的相对时间必须先换算成具体赛季再写入：欧洲联赛赛季从每年8月跨到次年5月，按给出的"今天"换算（例：今天是2026年6月，刚结束的"上赛季/本赛季"=2025-26赛季，再往前一年才是2024-25）。涉及赛季数据时，搜索词必须同时含球员/球队名、换算后的具体赛季（如"2025-26"）、联赛或赛事名、指标名（进球/助攻等）。
 difficulty：涉及具体球员/球队事实数据的问题、需要多步推理/复杂分析/出线概率计算的，一律 hard；纯闲聊对线为 easy。`
 
@@ -456,6 +456,36 @@ const verifierPrompt = `你是足球数据核实员。给你一个问题和若�
 只输出JSON，不要其他文字：
 {"conclusion":"结论（通常一句话；列表类问题给完整多行列表），必须包含赛季/口径、数字和依据来源","confidence":"high|medium|low","need_queries":"还需要的搜索词，最多2个用|分隔，不需要留空","need_url":"需要抓取正文的URL，不需要留空"}`
 
+// statmuseAsk fetches StatMuse's direct answer for an English query into the
+// evidence map; reports whether anything was added.
+func (h *Handler) statmuseAsk(ctx context.Context, q string, evidence map[string]any) bool {
+	key := "StatMuse直答（" + q + "）"
+	if _, done := evidence[key]; done {
+		return false
+	}
+	ask := "https://www.statmuse.com/fc/ask?q=" + url.QueryEscape(q)
+	text := fetchPageText(ctx, ask, q)
+	if text == "" {
+		return false
+	}
+	evidence[key] = text
+	h.logger.Info("verifier asked statmuse", "query", q)
+	return true
+}
+
+// isEnglishQuery reports whether a query is CJK-free enough to be useful as
+// an English search/StatMuse question.
+func isEnglishQuery(q string) bool {
+	cjk, total := 0, 0
+	for _, r := range q {
+		total++
+		if r >= 0x4e00 && r <= 0x9fff {
+			cjk++
+		}
+	}
+	return total > 0 && cjk*10 < total
+}
+
 // englishQueries pulls the ASCII-dominant search queries out of the evidence
 // keys (the router emits one English and one Chinese query).
 func englishQueries(evidence map[string]any) []string {
@@ -466,14 +496,7 @@ func englishQueries(evidence map[string]any) []string {
 			continue
 		}
 		q = strings.TrimSuffix(q, "）")
-		cjk, total := 0, 0
-		for _, r := range q {
-			total++
-			if r >= 0x4e00 && r <= 0x9fff {
-				cjk++
-			}
-		}
-		if total > 0 && cjk*10 < total {
+		if isEnglishQuery(q) {
 			out = append(out, q)
 		}
 	}
@@ -483,6 +506,13 @@ func englishQueries(evidence map[string]any) []string {
 type verdictEntry struct {
 	Verdict   string    `json:"verdict"`
 	FetchedAt time.Time `json:"fetched_at"`
+}
+
+// verdictLogEntry is one row of the rolling cross-question verdict log.
+type verdictLogEntry struct {
+	Q       string    `json:"q"`
+	Verdict string    `json:"verdict"`
+	At      time.Time `json:"at"`
 }
 
 // verifyFacts runs a deep-thinking adjudication pass over search evidence,
@@ -500,14 +530,24 @@ func (h *Handler) verifyFacts(ctx context.Context, question string, evidence map
 		return cached.Verdict
 	}
 
+	// Recent verdicts ride along as reference evidence so the same fact
+	// asked in different words gets a consistent adjudication.
+	var priorLog []verdictLogEntry
+	_ = h.profiles.store.LoadJSON("wcdb", "verdict-recent", &priorLog)
+	var prior []verdictLogEntry
+	for _, p := range priorLog {
+		if time.Since(p.At) < searchTTL {
+			prior = append(prior, p)
+		}
+	}
+	if len(prior) > 0 {
+		evidence["近期已核实结论（同一事实保持口径一致，除非有更强证据推翻）"] = prior
+	}
+
 	// StatMuse answers stat questions in one plain-HTML sentence: feed it
 	// the English search query directly as a cheap, high-signal source.
 	for _, q := range englishQueries(evidence) {
-		ask := "https://www.statmuse.com/fc/ask?q=" + url.QueryEscape(q)
-		if text := fetchPageText(ctx, ask, q); text != "" {
-			evidence["StatMuse直答（"+q+"）"] = text
-			h.logger.Info("verifier asked statmuse", "query", q)
-		}
+		h.statmuseAsk(ctx, q, evidence)
 		break // one StatMuse ask is enough
 	}
 
@@ -580,6 +620,10 @@ func (h *Handler) verifyFacts(ctx context.Context, question string, evidence map
 					evidence["搜索（"+q+"）"] = results
 					grew = true
 				}
+				// an English refine query is also a StatMuse question
+				if isEnglishQuery(q) && h.statmuseAsk(ctx, q, evidence) {
+					grew = true
+				}
 			}
 			if v.NeedURL != "" {
 				if text := fetchPageText(ctx, v.NeedURL, question); text != "" {
@@ -601,6 +645,15 @@ func (h *Handler) verifyFacts(ctx context.Context, question string, evidence map
 		}
 		if err := h.profiles.store.SaveJSON("wcdb", cacheKey, verdictEntry{Verdict: verdict, FetchedAt: time.Now()}); err != nil {
 			h.logger.Error("persist verdict cache failed", "error", err)
+		}
+		var vlog []verdictLogEntry
+		_ = h.profiles.store.LoadJSON("wcdb", "verdict-recent", &vlog)
+		vlog = append(vlog, verdictLogEntry{Q: question, Verdict: verdict, At: time.Now()})
+		if len(vlog) > 10 {
+			vlog = vlog[len(vlog)-10:]
+		}
+		if err := h.profiles.store.SaveJSON("wcdb", "verdict-recent", vlog); err != nil {
+			h.logger.Error("persist verdict log failed", "error", err)
 		}
 		return verdict
 	}
