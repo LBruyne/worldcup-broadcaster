@@ -70,13 +70,21 @@ func TestRenderBoards(t *testing.T) {
 
 func TestRenderGroupTable(t *testing.T) {
 	g := espn.GroupStanding{Name: "Group A", Letter: "A", Entries: []espn.StandingEntry{
-		{Team: "Mexico", Rank: 1, Points: 3, Wins: 1, Played: 1, GoalDiff: 2, Advanced: "Advanced to round of 32"},
-		{Team: "South Africa", Rank: 2, Points: 0, Losses: 1, Played: 1, GoalDiff: -2},
+		{Team: "Mexico", Rank: 1, Points: 3, Wins: 1, Played: 1, GoalDiff: 2, Advanced: "1"},
+		{Team: "South Korea", Rank: 2, Points: 0, Played: 1, Advanced: "0", Note: "Advance to Round of 32"},
+		{Team: "Czechia", Rank: 3, Points: 0, Played: 1, Advanced: "0", Note: "Best 8 advance"},
+		{Team: "South Africa", Rank: 4, Points: 0, Losses: 1, Played: 1, GoalDiff: -2, Advanced: "0", Note: "Eliminated"},
 	}}
 	got := RenderGroupTable(g)
-	for _, want := range []string{"📊 A组积分榜", "1. 墨西哥 3分（1胜0平0负 净胜+2） ✅晋级", "2. 南非 0分（0胜0平1负 净胜-2）"} {
+	for _, want := range []string{"📊 A组积分榜", "1. 墨西哥 3分（1胜0平0负 净胜+2） ✅晋级",
+		"2. 韩国 0分（0胜0平0负 净胜+0） 🟢", "3. 捷克 0分（0胜0平0负 净胜+0） 🟡",
+		"4. 南非 0分（0胜0平1负 净胜-2） 🔴"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("table missing %q:\n%s", want, got)
 		}
+	}
+	// a 0-point team must never show the clinched mark
+	if strings.Contains(got, "韩国 0分（0胜0平0负 净胜+0） ✅") {
+		t.Error("unclinched team marked as qualified")
 	}
 }

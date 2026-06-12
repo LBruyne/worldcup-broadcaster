@@ -221,14 +221,19 @@ func (h *Handler) grounding(ctx context.Context, question string) (string, bool)
 			matchAttached = true
 		}
 	}
-	if matchAttached && deicticMatchRe.MatchString(question) {
+	// Drop the web search only for questions answerable purely from the
+	// match feed (lineup/score/events) — searching those surfaces some
+	// other match entirely. A question that also reaches beyond the match
+	// (a player's club, season stats, ...) keeps its search.
+	beyond := beyondMatchRe.MatchString(question)
+	if matchAttached && deicticMatchRe.MatchString(question) && !beyond {
 		r.Search = ""
 	}
 	// Safety net: the no-thinking router sometimes misjudges evaluation or
 	// comparison questions as banter. Anything carrying a season/stat keyword
 	// must hit the search+verify path — fall back to the raw question as the
 	// query (the verifier can refine it in its second round).
-	if r.Search == "" && !matchAttached && factualQuestionRe.MatchString(question) {
+	if r.Search == "" && (!matchAttached || beyond) && factualQuestionRe.MatchString(question) {
 		r.Search = question
 		r.Difficulty = "hard"
 		h.logger.Info("router missed factual question, forcing search", "question", question)
@@ -276,6 +281,11 @@ func (h *Handler) grounding(ctx context.Context, question string) (string, bool)
 // deicticMatchRe spots questions about "this match" — the live (or most
 // recent) World Cup game — which must be grounded in the per-match feed.
 var deicticMatchRe = regexp.MustCompile(`这场|本场|这比赛|现在(这|的)?比赛|正在踢|直播这场`)
+
+// beyondMatchRe spots question aspects the per-match feed cannot answer
+// (club career, transfers, season stats...), which still need a web search
+// even when the question references "this match".
+var beyondMatchRe = regexp.MustCompile(`俱乐部|效力|转会|身价|赛季|英超|西甲|德甲|意甲|法甲|联赛|履历|生涯|年龄|多大|什么来头|资料|背景|国家队进球|世界排名`)
 
 // matchDetail assembles the authoritative per-match blob (score, formations,
 // starting XI, bench, key events, venue) for a match reference: a team name,

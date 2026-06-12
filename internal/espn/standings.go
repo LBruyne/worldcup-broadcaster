@@ -23,7 +23,8 @@ type StandingEntry struct {
 	Losses   int
 	GoalDiff int
 	Played   int
-	Advanced string // non-empty when ESPN marks the team as qualified
+	Advanced string // "1" when ESPN marks the team as mathematically through
+	Note     string // positional note ("Advance to Round of 32", "Eliminated", ...)
 }
 
 // standingsURL uses the /apis/v2 path (not /apis/site/v2).
@@ -52,6 +53,9 @@ func ParseStandings(body []byte) ([]GroupStanding, error) {
 					Team struct {
 						DisplayName string `json:"displayName"`
 					} `json:"team"`
+					Note struct {
+						Description string `json:"description"`
+					} `json:"note"`
 					Stats []struct {
 						Name         string  `json:"name"`
 						Value        float64 `json:"value"`
@@ -68,7 +72,7 @@ func ParseStandings(body []byte) ([]GroupStanding, error) {
 	for _, ch := range doc.Children {
 		g := GroupStanding{Name: ch.Name, Letter: strings.TrimPrefix(ch.Name, "Group ")}
 		for _, e := range ch.Standings.Entries {
-			se := StandingEntry{Team: e.Team.DisplayName}
+			se := StandingEntry{Team: e.Team.DisplayName, Note: e.Note.Description}
 			for _, s := range e.Stats {
 				v := int(s.Value)
 				switch s.Name {

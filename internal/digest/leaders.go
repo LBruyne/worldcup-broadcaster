@@ -175,12 +175,20 @@ func RenderGroupTable(g espn.GroupStanding) string {
 	fmt.Fprintf(&b, "📊 %s组积分榜：\n", g.Letter)
 	for _, e := range g.Entries {
 		mark := ""
-		if e.Advanced != "" && e.Advanced != "-" {
+		switch {
+		case e.Advanced == "1": // mathematically through
 			mark = " ✅晋级"
+		case strings.Contains(e.Note, "Advance"):
+			mark = " 🟢" // current rank is a qualifying spot
+		case strings.Contains(e.Note, "Best"):
+			mark = " 🟡" // fighting for a best-third spot
+		case strings.Contains(e.Note, "Eliminated"):
+			mark = " 🔴" // currently in an elimination spot
 		}
 		fmt.Fprintf(&b, "%d. %s %d分（%d胜%d平%d负 净胜%+d）%s\n",
 			e.Rank, cnmap.Name(e.Team), e.Points, e.Wins, e.Ties, e.Losses, e.GoalDiff, mark)
 	}
+	b.WriteString("🟢当前处晋级位 🟡争最佳第三 🔴当前处淘汰位 ✅已锁定晋级")
 	return strings.TrimRight(b.String(), "\n")
 }
 
