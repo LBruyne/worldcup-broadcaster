@@ -645,3 +645,30 @@ func TestPoliticsRedlineInPrompts(t *testing.T) {
 		t.Error("politics redline / called mode missing from prompts")
 	}
 }
+
+// Every selfReviewEvery bot replies trigger an LLM self-review whose notes
+// land in the group style and ride along in subsequent prompts.
+func TestSelfReviewLoop(t *testing.T) {
+	llm := &fakeLLM{reply: "回复再短一点；比分先核对比赛详情再说"}
+	h, _ := newHandler(t, llm)
+	for i := 0; i < selfReviewEvery; i++ {
+		h.reply(861376113, "msg")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for h.reflectionNotes(861376113) == "" && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := h.reflectionNotes(861376113); !strings.Contains(got, "回复再短一点") {
+		t.Fatalf("reflection = %q", got)
+	}
+	// notes must be injected into the next ask payload
+	llm.gotUser = ""
+	h.OnGroupMessage(context.Background(), 861376113, 0, "小明", "/ask 你好")
+	deadline = time.Now().Add(3 * time.Second)
+	for !strings.Contains(llm.gotUser, "你好") && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(llm.gotUser, "回复再短一点") {
+		t.Errorf("reflection missing from ask payload: %.300s", llm.gotUser)
+	}
+}

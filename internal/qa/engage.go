@@ -70,6 +70,7 @@ func (h *Handler) maybeEngage(ctx context.Context, groupID int64, nickname, text
 	styleDesc, tone := h.styleContext(groupID)
 	fields := map[string]any{
 		"模式":     mode,
+		"自我改进要点": h.reflectionNotes(groupID),
 		"本群群名":   h.groupName(groupID),
 		"本群说话风格": styleDesc,
 		"群友语气要求": tone,

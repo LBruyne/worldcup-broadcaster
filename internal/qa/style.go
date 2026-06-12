@@ -11,11 +11,13 @@ import (
 // groupStyle is the per-group voice model: a learned description of how the
 // group talks, plus explicit tone directives members gave via /tone.
 type groupStyle struct {
-	StyleDesc string    `json:"style_desc"` // learned from chat
-	Tone      string    `json:"tone"`       // member-requested directives
-	Mode      string    `json:"mode"`       // persona mode: 助手 (default) | 嘴臭
-	MsgCount  int       `json:"msg_count"`  // messages since last style refresh
-	UpdatedAt time.Time `json:"updated_at"`
+	StyleDesc   string    `json:"style_desc"`    // learned from chat
+	Tone        string    `json:"tone"`          // member-requested directives
+	Mode        string    `json:"mode"`          // persona mode: 助手 (default) | 嘴臭
+	MsgCount    int       `json:"msg_count"`     // messages since last style refresh
+	Reflection  string    `json:"reflection"`    // self-review improvement notes
+	BotMsgCount int       `json:"bot_msg_count"` // bot replies since last self-review
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 const styleRefreshEvery = 30 // group messages between style re-learning
@@ -106,6 +108,73 @@ func (h *Handler) observeStyle(ctx context.Context, groupID int64) {
 		h.persistStyle(groupID)
 		h.logger.Info("group style learned", "group", groupID, "style", out)
 	}()
+}
+
+const selfReviewEvery = 15 // bot replies between self-reviews
+
+const selfReviewPrompt = `你是QQ群机器人的质量审查员。给你最近的群聊记录（昵称"AAA世界杯稳定盈利"的发言是机器人自己说的）和已有的改进要点。审查机器人最近的发言：
+- 数据疑点：比分/球员数据/赛季口径有没有说错或与上下文矛盾的地方
+- 分寸：是否话太多、回复太长、刷存在感、打扰群友
+- 拟人度：哪些表达太像客服/AI、与群友说话方式脱节
+把新发现合并进改进要点（保留仍然有效的旧要点，去掉过时的），输出100字以内的祈使句要点文本；没有新发现就原样输出旧要点。直接输出文本，不要解释。`
+
+// observeSelf counts the bot's own replies and periodically runs an LLM
+// self-review over recent chat, merging findings into the group's
+// reflection notes (injected into every subsequent prompt).
+func (h *Handler) observeSelf(groupID int64) {
+	if h.llm == nil {
+		return
+	}
+	st := h.loadStyle(groupID)
+	h.styleMu.Lock()
+	st.BotMsgCount++
+	due := st.BotMsgCount >= selfReviewEvery && !h.styleBusy[groupID]
+	if due {
+		st.BotMsgCount = 0
+		h.styleBusy[groupID] = true
+	}
+	h.styleMu.Unlock()
+	if !due {
+		return
+	}
+	go func() {
+		defer func() {
+			h.styleMu.Lock()
+			h.styleBusy[groupID] = false
+			h.styleMu.Unlock()
+		}()
+		h.styleMu.Lock()
+		old := st.Reflection
+		h.styleMu.Unlock()
+		payload, err := json.Marshal(map[string]any{"群聊记录": h.recentChat(groupID), "已有改进要点": old})
+		if err != nil {
+			return
+		}
+		cctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
+		out, err := h.llm.Generate(cctx, selfReviewPrompt, string(payload))
+		if err != nil {
+			h.logger.Error("self review failed", "group", groupID, "error", err)
+			return
+		}
+		out = strings.TrimSpace(out)
+		if out == "" {
+			return
+		}
+		h.styleMu.Lock()
+		st.Reflection = out
+		h.styleMu.Unlock()
+		h.persistStyle(groupID)
+		h.logger.Info("self review updated", "group", groupID, "notes", out)
+	}()
+}
+
+// reflectionNotes returns the group's current self-review notes.
+func (h *Handler) reflectionNotes(groupID int64) string {
+	st := h.loadStyle(groupID)
+	h.styleMu.Lock()
+	defer h.styleMu.Unlock()
+	return st.Reflection
 }
 
 // cmdTone handles "/tone [模式|要求|重置]": switch between persona modes
