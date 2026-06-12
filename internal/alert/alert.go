@@ -20,7 +20,8 @@ type Alerter struct {
 	adminQQ  int64
 	logger   *slog.Logger
 	cooldown time.Duration
-	cmd      string // optional fallback shell command (webhook etc.)
+	cmd      string     // optional fallback shell command (webhook etc.)
+	text     TextSender // optional out-of-QQ text channel (DingTalk)
 
 	mu   sync.Mutex
 	last map[string]time.Time
@@ -43,6 +44,14 @@ func New(n Notifier, adminQQ int64, logger *slog.Logger) *Alerter {
 // ALERT_CATEGORY / ALERT_MESSAGE in its environment. Unlike the QQ private
 // message, it still works while the QQ session itself is dead.
 func (a *Alerter) SetCommand(cmd string) { a.cmd = cmd }
+
+// TextSender is implemented by *dingtalk.Client.
+type TextSender interface {
+	SendText(text string) error
+}
+
+// SetTextSender wires an additional out-of-QQ alert channel (DingTalk).
+func (a *Alerter) SetTextSender(s TextSender) { a.text = s }
 
 // Alert logs the problem and, at most once per cooldown per category,
 // notifies the admin via QQ private message and the fallback command.
@@ -72,6 +81,13 @@ func (a *Alerter) Alert(category, msg string) {
 			c.Env = append(os.Environ(), "ALERT_CATEGORY="+category, "ALERT_MESSAGE="+text)
 			if out, err := c.CombinedOutput(); err != nil {
 				a.logger.Error("alert command failed", "error", err, "output", string(out))
+			}
+		}()
+	}
+	if a.text != nil {
+		go func() {
+			if err := a.text.SendText(text); err != nil {
+				a.logger.Error("dingtalk alert failed", "error", err)
 			}
 		}()
 	}

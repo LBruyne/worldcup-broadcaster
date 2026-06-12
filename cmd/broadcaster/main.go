@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"worldcup-broadcaster/internal/alert"
 	"worldcup-broadcaster/internal/config"
 	"worldcup-broadcaster/internal/digest"
+	"worldcup-broadcaster/internal/dingtalk"
 	"worldcup-broadcaster/internal/espn"
 	"worldcup-broadcaster/internal/llm"
 	"worldcup-broadcaster/internal/onebot"
@@ -70,6 +72,13 @@ func main() {
 	if cfg.OneBot.AlertCmd != "" {
 		alerter.SetCommand(cfg.OneBot.AlertCmd)
 	}
+	var ding *dingtalk.Client
+	if cfg.OneBot.DingWebhook != "" {
+		ding = dingtalk.New(cfg.OneBot.DingWebhook, cfg.OneBot.DingSecret)
+		alerter.SetTextSender(ding)
+		logger.Info("dingtalk alert channel enabled")
+	}
+	startQRServer(ctx, cfg, logger)
 	bot.OnSendError = func(err error) { alerter.Alert("onebot", "QQ消息发送失败: "+err.Error()) }
 	bot.Start(ctx)
 
@@ -159,7 +168,7 @@ func main() {
 	}
 
 	if cfg.OneBot.KeepaliveIntervalMin > 0 {
-		go qqKeepalive(ctx, cfg, bot, alerter, logger)
+		go qqKeepalive(ctx, cfg, bot, alerter, ding, logger)
 	}
 
 	sched := newMatchScheduler(w, espnClient, alerter, logger)
@@ -189,11 +198,11 @@ func main() {
 // qqKeepalive probes NapCat's online status and self-heals: on failure it
 // alerts the admin (best-effort) and runs the restart command, at most once
 // per 20 minutes.
-func qqKeepalive(ctx context.Context, cfg *config.Config, bot *onebot.Client, alerter *alert.Alerter, logger *slog.Logger) {
+func qqKeepalive(ctx context.Context, cfg *config.Config, bot *onebot.Client, alerter *alert.Alerter, ding *dingtalk.Client, logger *slog.Logger) {
 	interval := time.Duration(cfg.OneBot.KeepaliveIntervalMin) * time.Minute
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	var lastRestart time.Time
+	var lastRestart, lastQRPush time.Time
 	consecutive := 0
 	reconnectTried := false // one automatic relogin attempt per outage
 	runCmd := func(name, cmd string) {
@@ -215,6 +224,10 @@ func qqKeepalive(ctx context.Context, cfg *config.Config, bot *onebot.Client, al
 		if err == nil && online {
 			if consecutive > 0 {
 				logger.Info("qq back online", "after_failures", consecutive)
+				if ding != nil && !lastQRPush.IsZero() {
+					go func() { _ = ding.SendText("✅ 世界杯Bot QQ已恢复在线") }()
+					lastQRPush = time.Time{}
+				}
 			}
 			consecutive = 0
 			reconnectTried = false
@@ -242,6 +255,25 @@ func qqKeepalive(ctx context.Context, cfg *config.Config, bot *onebot.Client, al
 			if cfg.OneBot.QRSyncCmd != "" {
 				runCmd("qr sync", cfg.OneBot.QRSyncCmd)
 			}
+			// Push the auto-refreshing scan page to DingTalk (at most every
+			// 30 minutes per outage) — the page polls the freshest QR, so
+			// the link never expires.
+			if ding != nil && cfg.OneBot.QRPublicURL != "" && cfg.OneBot.QRToken != "" &&
+				time.Since(lastQRPush) > 30*time.Minute {
+				lastQRPush = time.Now()
+				page := strings.TrimRight(cfg.OneBot.QRPublicURL, "/") + "/qr/" + cfg.OneBot.QRToken + "/"
+				md := fmt.Sprintf("### ⚠️ 世界杯Bot QQ掉线，需重新扫码\n"+
+					"![qr](%sqrcode.png?t=%d)\n\n"+
+					"[👉 打开自动刷新扫码页（二维码永不过期）](%s)\n\n"+
+					"用 **Bot号** 的手机QQ扫；扫完无需任何操作，Bot自动恢复", page, time.Now().Unix(), page)
+				go func() {
+					if err := ding.SendMarkdown("Bot掉线需扫码", md); err != nil {
+						logger.Error("dingtalk qr push failed", "error", err)
+					} else {
+						logger.Info("dingtalk qr push sent")
+					}
+				}()
+			}
 			logger.Warn("napcat alive but qq offline; awaiting manual login", "consecutive", consecutive)
 			alerter.Alert("qq-login", fmt.Sprintf(
 				"QQ登录态失效（连续%d次探测失败），自动重连无效，需要人工扫码：最新二维码已同步到 qrcode-login.png，或打开 NapCat WebUI 扫码", consecutive))
@@ -253,6 +285,54 @@ func qqKeepalive(ctx context.Context, cfg *config.Config, bot *onebot.Client, al
 			runCmd("restart command", cfg.OneBot.RestartCmd)
 		}
 	}
+}
+
+// startQRServer serves an auto-refreshing login-QR page at /qr/<token>/ so
+// a pushed link never goes stale: every image request re-syncs the QR from
+// the NapCat container first (throttled).
+func startQRServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) {
+	ob := cfg.OneBot
+	if ob.QRServeAddr == "" || ob.QRToken == "" || ob.QRFile == "" {
+		return
+	}
+	var syncMu sync.Mutex
+	var lastSync time.Time
+	prefix := "/qr/" + ob.QRToken
+	mux := http.NewServeMux()
+	mux.HandleFunc(prefix+"/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Bot 扫码登录</title>
+<body style="text-align:center;font-family:sans-serif;padding-top:24px">
+<h3>用 Bot 号的手机QQ扫码登录</h3>
+<img id="q" src="qrcode.png" width="280" style="border:1px solid #ddd">
+<p style="color:#888">二维码每 5 秒自动刷新，不会过期；扫到“登录确认”即可关闭本页</p>
+<script>setInterval(function(){document.getElementById('q').src='qrcode.png?t='+Date.now()},5000)</script>`)
+	})
+	mux.HandleFunc(prefix+"/qrcode.png", func(w http.ResponseWriter, r *http.Request) {
+		if ob.QRSyncCmd != "" {
+			syncMu.Lock()
+			if time.Since(lastSync) > 3*time.Second {
+				lastSync = time.Now()
+				if out, err := exec.CommandContext(ctx, "sh", "-c", ob.QRSyncCmd).CombinedOutput(); err != nil {
+					logger.Debug("qr sync on demand failed", "error", err, "output", string(out))
+				}
+			}
+			syncMu.Unlock()
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		http.ServeFile(w, r, ob.QRFile)
+	})
+	srv := &http.Server{Addr: ob.QRServeAddr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	go func() {
+		<-ctx.Done()
+		_ = srv.Close()
+	}()
+	go func() {
+		logger.Info("qr scan page serving", "addr", ob.QRServeAddr, "path", prefix+"/")
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("qr server failed", "error", err)
+		}
+	}()
 }
 
 // napcatAlive reports whether NapCat's WebUI answers HTTP at all — proof the

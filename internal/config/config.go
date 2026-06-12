@@ -35,6 +35,20 @@ type OneBot struct {
 	// out, keeping the latest login QR code at a stable path for instant
 	// scanning. Empty disables.
 	QRSyncCmd string `yaml:"qr_sync_cmd"`
+	// QRFile is where QRSyncCmd leaves the latest login QR image.
+	QRFile string `yaml:"qr_file"`
+	// QRServeAddr, when set (e.g. "0.0.0.0:8090"), serves an auto-
+	// refreshing scan page at /qr/<qr_token>/ so the QR never goes stale.
+	QRServeAddr string `yaml:"qr_serve_addr"`
+	// QRPublicURL is the externally reachable base URL of the QR server,
+	// used in DingTalk notifications.
+	QRPublicURL string `yaml:"qr_public_url"`
+	// QRToken guards the QR page path.
+	QRToken string `yaml:"qr_token"`
+	// DingWebhook/DingSecret configure a DingTalk group robot: alerts go
+	// there too, and on login loss the scan-page link + QR are pushed.
+	DingWebhook string `yaml:"ding_webhook"`
+	DingSecret  string `yaml:"ding_secret"`
 	// WebUIURL is NapCat's WebUI address, used as a liveness probe: when QQ
 	// is offline but the WebUI still answers, NapCat is alive and merely
 	// waiting for a manual login — restarting would only invalidate the QR
