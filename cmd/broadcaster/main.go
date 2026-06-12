@@ -75,6 +75,7 @@ func main() {
 	var ding *dingtalk.Client
 	if cfg.OneBot.DingWebhook != "" {
 		ding = dingtalk.New(cfg.OneBot.DingWebhook, cfg.OneBot.DingSecret)
+		ding.SetKeyword(cfg.OneBot.DingKeyword)
 		alerter.SetTextSender(ding)
 		logger.Info("dingtalk alert channel enabled")
 	}

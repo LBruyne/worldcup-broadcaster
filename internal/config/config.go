@@ -49,6 +49,9 @@ type OneBot struct {
 	// there too, and on login loss the scan-page link + QR are pushed.
 	DingWebhook string `yaml:"ding_webhook"`
 	DingSecret  string `yaml:"ding_secret"`
+	// DingKeyword is the robot custom-keyword security term, auto-prefixed
+	// onto outgoing messages when missing.
+	DingKeyword string `yaml:"ding_keyword"`
 	// WebUIURL is NapCat's WebUI address, used as a liveness probe: when QQ
 	// is offline but the WebUI still answers, NapCat is alive and merely
 	// waiting for a manual login — restarting would only invalidate the QR

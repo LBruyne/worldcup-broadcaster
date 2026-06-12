@@ -12,17 +12,30 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
 type Client struct {
 	webhook string
 	secret  string
+	keyword string // custom-keyword security: auto-prefixed when missing
 	http    *http.Client
 }
 
 func New(webhook, secret string) *Client {
 	return &Client{webhook: webhook, secret: secret, http: &http.Client{Timeout: 10 * time.Second}}
+}
+
+// SetKeyword configures the robot's custom-keyword security term; outgoing
+// messages that don't already contain it get it prefixed.
+func (c *Client) SetKeyword(kw string) { c.keyword = kw }
+
+func (c *Client) withKeyword(s string) string {
+	if c.keyword == "" || strings.Contains(s, c.keyword) {
+		return s
+	}
+	return "【" + c.keyword + "】" + s
 }
 
 // signedURL appends timestamp+sign when a secret is configured.
@@ -41,7 +54,7 @@ func (c *Client) signedURL() string {
 func (c *Client) SendText(text string) error {
 	return c.post(map[string]any{
 		"msgtype": "text",
-		"text":    map[string]string{"content": text},
+		"text":    map[string]string{"content": c.withKeyword(text)},
 	})
 }
 
@@ -49,7 +62,7 @@ func (c *Client) SendText(text string) error {
 func (c *Client) SendMarkdown(title, md string) error {
 	return c.post(map[string]any{
 		"msgtype":  "markdown",
-		"markdown": map[string]string{"title": title, "text": md},
+		"markdown": map[string]string{"title": c.withKeyword(title), "text": c.withKeyword(md)},
 	})
 }
 
