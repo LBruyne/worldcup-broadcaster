@@ -80,9 +80,29 @@ type Summary struct {
 	HeadToHeadGames []H2HTeam       `json:"headToHeadGames"`
 	Standings       json.RawMessage `json:"standings"`
 	Leaders         json.RawMessage `json:"leaders"`
+	Rosters         []Roster        `json:"rosters"`
 	GameInfo        struct {
 		Venue Venue `json:"venue"`
 	} `json:"gameInfo"`
+}
+
+// Roster is one team's match-day squad with formation and starters.
+type Roster struct {
+	HomeAway  string        `json:"homeAway"`
+	Formation string        `json:"formation"`
+	Team      Team          `json:"team"`
+	Roster    []RosterEntry `json:"roster"`
+}
+
+type RosterEntry struct {
+	Jersey  string `json:"jersey"`
+	Starter bool   `json:"starter"`
+	Athlete struct {
+		DisplayName string `json:"displayName"`
+	} `json:"athlete"`
+	Position struct {
+		Abbreviation string `json:"abbreviation"`
+	} `json:"position"`
 }
 
 type Header struct {

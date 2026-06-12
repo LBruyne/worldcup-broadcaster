@@ -239,3 +239,36 @@ func TestFactualGuardSkipsBanter(t *testing.T) {
 		t.Error("pure banter must not trigger the verify pipeline")
 	}
 }
+
+// "这场比赛" questions must be grounded in the per-match ESPN feed and must
+// not fall through to a web search (which surfaces unrelated matches).
+func TestDeicticMatchGrounding(t *testing.T) {
+	llm := &routerLLM{
+		route:  `{"needs":[],"difficulty":"easy","search":"首发阵容 比赛"}`,
+		answer: "ok",
+	}
+	h, sender := newHandler(t, llm)
+	h.OnGroupMessage(context.Background(), 861376113, 0, "小明", "/ask 看看这场比赛首发阵容")
+	deadlineWait(t, sender, 1)
+	if !strings.Contains(llm.askUser, "比赛详情（当前）") {
+		t.Errorf("match detail missing: %.300s", llm.askUser)
+	}
+	if strings.Contains(llm.askUser, "网络搜索结果") {
+		t.Error("deictic match question must not carry web search noise")
+	}
+	// fixture is the finished 2022 final: lineups come from its summary
+	if !strings.Contains(llm.askUser, "首发阵容") {
+		t.Errorf("lineups missing: %.300s", llm.askUser)
+	}
+}
+
+func TestResolveMatchRefByTeam(t *testing.T) {
+	h, _ := newHandler(t, nil)
+	row := h.resolveMatchRef(context.Background(), "法国")
+	if row == nil || row.Away != "法国" {
+		t.Fatalf("row = %+v", row)
+	}
+	if h.resolveMatchRef(context.Background(), "不存在的队") != nil {
+		t.Error("unknown team must resolve to nil")
+	}
+}

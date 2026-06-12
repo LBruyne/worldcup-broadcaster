@@ -131,6 +131,7 @@ needs 可选值（按需多选，无需数据时为空数组）：
 - "standings"：小组积分榜/出线形势
 - "leaderboards"：射手榜/助攻榜
 - "today"：今明两天的比赛
+- "match:队名或'当前'"：某场【世界杯】比赛的现场详情——首发阵容/阵型/换人/进球过程/比赛事件（问"这场/本场比赛"用"match:当前"；问到具体球队的某场用"match:队名"）
 search：以下情况【必须】填搜索关键词：问题涉及任何具体球员（含外号：B费、丁丁、拉师傅等都是球员）或球队的数据/近况/表现/成绩/评价/比较/排名/逐场明细，或本届世界杯数据之外的足球事实（历史战绩、转会、伤病、俱乐部赛事等）。"XX表现怎么样""谁成绩好"这类评价比较类问题也是事实数据问题，必须搜索。可以给最多2个查询（用|分隔），中英文各一个效果最好，外号要换成正式名字（B费→Bruno Fernandes）。纯闲聊/对线/观点类问题才留空。
 搜索词里的相对时间必须先换算成具体赛季再写入：欧洲联赛赛季从每年8月跨到次年5月，按给出的"今天"换算（例：今天是2026年6月，刚结束的"上赛季/本赛季"=2025-26赛季，再往前一年才是2024-25）。涉及赛季数据时，搜索词必须同时含球员/球队名、换算后的具体赛季（如"2025-26"）、联赛或赛事名、指标名（进球/助攻等）。
 difficulty：涉及具体球员/球队事实数据的问题、需要多步推理/复杂分析/出线概率计算的，一律 hard；纯闲聊对线为 easy。`
@@ -197,13 +198,36 @@ func (h *Handler) grounding(ctx context.Context, question string) (string, bool)
 		case need == "today":
 			var todays json.RawMessage = json.RawMessage(h.liveData(ctx))
 			data["今日数据"] = todays
+		case strings.HasPrefix(need, "match:"):
+			ref := strings.TrimPrefix(need, "match:")
+			if detail := h.matchDetail(ctx, ref); detail != nil {
+				data["比赛详情（"+ref+"）"] = detail
+			}
 		}
+	}
+	// Deictic match questions ("这场比赛的首发…") must be answered from the
+	// authoritative per-match feed; a web search would surface some other
+	// match entirely, so it is dropped (and not re-forced below).
+	matchAttached := false
+	for key := range data {
+		if strings.HasPrefix(key, "比赛详情（") {
+			matchAttached = true
+		}
+	}
+	if deicticMatchRe.MatchString(question) && !matchAttached {
+		if detail := h.matchDetail(ctx, "当前"); detail != nil {
+			data["比赛详情（当前）"] = detail
+			matchAttached = true
+		}
+	}
+	if matchAttached && deicticMatchRe.MatchString(question) {
+		r.Search = ""
 	}
 	// Safety net: the no-thinking router sometimes misjudges evaluation or
 	// comparison questions as banter. Anything carrying a season/stat keyword
 	// must hit the search+verify path — fall back to the raw question as the
 	// query (the verifier can refine it in its second round).
-	if r.Search == "" && factualQuestionRe.MatchString(question) {
+	if r.Search == "" && !matchAttached && factualQuestionRe.MatchString(question) {
 		r.Search = question
 		r.Difficulty = "hard"
 		h.logger.Info("router missed factual question, forcing search", "question", question)
@@ -246,6 +270,124 @@ func (h *Handler) grounding(ctx context.Context, question string) (string, bool)
 	h.logger.Info("question grounded",
 		"needs", r.Needs, "search", r.Search, "difficulty", r.Difficulty, "verified", verdict != "")
 	return string(raw), think
+}
+
+// deicticMatchRe spots questions about "this match" — the live (or most
+// recent) World Cup game — which must be grounded in the per-match feed.
+var deicticMatchRe = regexp.MustCompile(`这场|本场|这比赛|现在(这|的)?比赛|正在踢|直播这场`)
+
+// matchDetail assembles the authoritative per-match blob (score, formations,
+// starting XI, bench, key events, venue) for a match reference: a team name,
+// or 当前/这场 for the live (else most recent / next) game.
+func (h *Handler) matchDetail(ctx context.Context, ref string) map[string]any {
+	row := h.resolveMatchRef(ctx, ref)
+	if row == nil {
+		return nil
+	}
+	sum, _, err := h.espn.Summary(ctx, row.ID)
+	if err != nil {
+		h.logger.Error("match detail fetch failed", "match", row.ID, "error", err)
+		return nil
+	}
+	st, home, away := sum.Live()
+	detail := map[string]any{
+		"比赛":     fmt.Sprintf("%s vs %s（%s，开球%s）", row.Home, row.Away, row.Stage, row.Kickoff),
+		"状态":     st.Type.Detail,
+		"比分":     home.Score + ":" + away.Score,
+		"场馆":     sum.GameInfo.Venue.FullName + "（" + sum.GameInfo.Venue.Address.City + "）",
+		"数据可信说明": "以下阵容与事件来自ESPN官方实时数据，直接采用",
+	}
+	var lineups []map[string]any
+	for _, ros := range sum.Rosters {
+		var starters, bench []string
+		for _, p := range ros.Roster {
+			s := p.Jersey + "号 " + p.Athlete.DisplayName
+			if p.Starter {
+				if p.Position.Abbreviation != "" {
+					s += "（" + p.Position.Abbreviation + "）"
+				}
+				starters = append(starters, s)
+			} else {
+				bench = append(bench, s)
+			}
+		}
+		lineups = append(lineups, map[string]any{
+			"球队": cnmap.Name(ros.Team.DisplayName),
+			"阵型": ros.Formation,
+			"首发": starters,
+			"替补": bench,
+		})
+	}
+	if len(lineups) > 0 {
+		detail["首发阵容"] = lineups
+	}
+	var events []string
+	for _, e := range sum.KeyEvents {
+		line := e.Clock.DisplayValue + " " + e.Type.Text
+		if len(e.Participants) > 0 {
+			var names []string
+			for _, p := range e.Participants {
+				names = append(names, p.Athlete.DisplayName)
+			}
+			line += "：" + strings.Join(names, "、")
+		}
+		if e.Team.DisplayName != "" {
+			line += "（" + cnmap.Name(e.Team.DisplayName) + "）"
+		}
+		events = append(events, line)
+	}
+	if len(events) > 0 {
+		detail["比赛事件"] = events
+	}
+	return detail
+}
+
+// resolveMatchRef maps a reference to a schedule row: by team name, or for
+// 当前/这场 the in-progress match (else the most recently finished, else the
+// next upcoming).
+func (h *Handler) resolveMatchRef(ctx context.Context, ref string) *matchRow {
+	rows := h.fullSchedule(ctx)
+	if len(rows) == 0 {
+		return nil
+	}
+	ref = strings.TrimSpace(ref)
+	deictic := ref == "" || ref == "当前" || ref == "这场" || ref == "本场" || ref == "现在"
+	if !deictic {
+		cn := cnmap.Name(cnmap.EnglishName(ref))
+		var team []*matchRow
+		for i := range rows {
+			if rows[i].Home == cn || rows[i].Away == cn {
+				team = append(team, &rows[i])
+			}
+		}
+		if len(team) == 0 {
+			return nil
+		}
+		rows2 := make([]matchRow, len(team))
+		for i, r := range team {
+			rows2[i] = *r
+		}
+		rows = rows2
+	}
+	// schedule rows are chronological: prefer live, then last finished,
+	// then the next not-started
+	var lastDone, firstUpcoming *matchRow
+	for i := range rows {
+		switch rows[i].Status {
+		case "进行中":
+			return &rows[i]
+		case "已结束":
+			lastDone = &rows[i]
+		case "未开赛":
+			if firstUpcoming == nil {
+				firstUpcoming = &rows[i]
+			}
+		}
+	}
+	if lastDone != nil {
+		return lastDone
+	}
+	return firstUpcoming
 }
 
 // factualQuestionRe catches questions that must never skip the search path:
