@@ -306,3 +306,43 @@ func TestMatchDetailCarriesStats(t *testing.T) {
 		}
 	}
 }
+
+// A real @-mention arrives as an "at" segment; it must be perceived exactly
+// like calling the bot by name, with full /ask-grade grounding.
+func TestAtSegmentTreatedAsCalled(t *testing.T) {
+	ev := onebotEvent{SelfID: 1051722693}
+	ev.Message = []byte(`[{"type":"at","data":{"qq":"1051722693"}},{"type":"text","data":{"text":" 这场比赛首发阵容是什么"}}]`)
+	text := ev.messageText()
+	if !addressesBot(text) {
+		t.Fatalf("at segment not perceived as called: %q", text)
+	}
+
+	llm := &routerLLM{
+		route:  `{"needs":[],"difficulty":"easy","search":""}`,
+		answer: "首发已列",
+	}
+	h, sender := newHandler(t, llm)
+	h.OnGroupMessage(context.Background(), 861376113, 0, "铁哥", text)
+	deadlineWait(t, sender, 1)
+	if !strings.Contains(llm.askUser, "已核实数据") || !strings.Contains(llm.askUser, "比赛详情（当前）") {
+		t.Errorf("@-question missing grounded data: %.300s", llm.askUser)
+	}
+}
+
+// Called mode runs grounding even WITHOUT factual keywords — identical
+// perception to /ask, whose router sees every question.
+func TestCalledAlwaysGrounded(t *testing.T) {
+	llm := &routerLLM{
+		route:  `{"needs":[],"difficulty":"easy","search":""}`,
+		answer: "在呢",
+	}
+	h, sender := newHandler(t, llm)
+	h.OnGroupMessage(context.Background(), 861376113, 0, "小明", "AAA 你在吗")
+	deadlineWait(t, sender, 1)
+	if llm.routeUser == "" {
+		t.Error("called engage must run the grounding router")
+	}
+	if !strings.Contains(llm.askUser, "已核实数据") {
+		t.Errorf("called engage missing grounded payload: %.200s", llm.askUser)
+	}
+}

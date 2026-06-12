@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -28,23 +29,36 @@ type onebotEvent struct {
 }
 
 // messageText extracts plain text from either segment-array or string
-// message formats.
+// message formats. A real @-mention of the bot arrives as an "at" segment
+// (not text): it is rewritten to the bot's name so the engagement engine
+// treats it exactly like being called by name.
 func (e *onebotEvent) messageText() string {
 	var segs []struct {
 		Type string `json:"type"`
 		Data struct {
 			Text string `json:"text"`
+			QQ   string `json:"qq"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(e.Message, &segs); err == nil {
+		atSelf := false
 		var b strings.Builder
 		for _, s := range segs {
-			if s.Type == "text" {
+			switch s.Type {
+			case "text":
 				b.WriteString(s.Data.Text)
+			case "at":
+				if s.Data.QQ == strconv.FormatInt(e.SelfID, 10) {
+					atSelf = true
+				}
 			}
 		}
 		if b.Len() > 0 {
-			return b.String()
+			text := b.String()
+			if atSelf && !strings.Contains(text, BotName) {
+				text = "@" + BotName + " " + strings.TrimSpace(text)
+			}
+			return text
 		}
 	}
 	var str string

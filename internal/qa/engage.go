@@ -78,11 +78,13 @@ func (h *Handler) maybeEngage(ctx context.Context, groupID int64, nickname, text
 		"在场成员画像": h.profiles.Known(chat),
 		"群聊上下文":  chat,
 	}
-	// A direct question to the bot (called) or a factual follow-up deserves
-	// the same grounded data as /ask — match details, search, verification.
-	// Plain banter keeps the cheap live snapshot.
+	// Being addressed directly (called) gets the full /ask grounding
+	// unconditionally — identical perception for @ and /ask. Follow-ups
+	// run it when they look factual; plain banter keeps the cheap
+	// snapshot.
 	think := false
-	if mode != "proactive" && (factualQuestionRe.MatchString(text) || deicticMatchRe.MatchString(text)) {
+	if mode == "called" ||
+		(mode == "followup" && (factualQuestionRe.MatchString(text) || deicticMatchRe.MatchString(text))) {
 		grounded, hard := h.grounding(ctx, text)
 		fields["今天"] = time.Now().UTC().Add(8 * time.Hour).Format("2006-01-02") + "（北京时间）"
 		fields["已核实数据"] = json.RawMessage(grounded)

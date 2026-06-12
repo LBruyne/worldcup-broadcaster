@@ -358,7 +358,7 @@ const engageSuffix = `
 - 模式=followup：你刚在群里说过话。判断这条消息是否在回复你/跟你继续讨论（点你名、接你话茬、反驳你观点、顺着你话题聊都算）。是→必须回；明显跟你无关→沉默。
 - 模式=proactive：按人设的参与纪律决定。拿不准就沉默。
 要沉默：只输出 PASS（四个大写字母，不带任何其他内容）。
-要说话：直接输出消息文本，60字以内，别自报家门，别用"我认为"开头。`
+要说话：直接输出消息文本，60字以内（回答数据/列表时可以超），别自报家门，别用"我认为"开头。`
 
 // personaMode returns the active voice for a group (assistant by default).
 func (h *Handler) personaMode(groupID int64) string {
