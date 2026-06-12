@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -256,11 +257,36 @@ const verifierPrompt = `你是足球数据核实员。给你一个问题和若�
 规则：
 - 先确定时间口径：会给你"今天"的日期。欧洲联赛赛季从每年8月跨到次年5月（例：今天是2026年6月，则"上赛季"=2025-26赛季）。
 - 严格区分统计口径：联赛进球≠各项赛事总进球≠生涯总进球≠为国家队进球；自媒体/视频标题（YouTube等）不可信；优先权威统计源（fbref、ESPN、联赛官网、Transfermarkt、StatMuse、维基百科的正文数据）。
+- 新闻报道里的累计数字可能是【赛季中途】的阶段值（如"第20次助攻追平纪录"发布时赛季未结束），优先统计站的赛季最终汇总；同一口径下统计站数字与旧新闻冲突时，以统计站为准。
 - 多个来源数字冲突时，分析冲突原因（口径不同？赛季不同？来源不可靠？），裁决出最可信的唯一答案。
-- 现有证据不足以下结论时，可要求补充搜索（换更精确的关键词）或抓取某条搜索结果URL的正文。
+- 现有证据不足以下结论时，可要求补充搜索（换更精确的关键词，支持 site: 语法如 "site:fbref.com Bruno Fernandes 2025-26"）或抓取某条搜索结果URL的正文。注意：fbref/Transfermarkt/维基百科是静态页面、正文里有数字；premierleague.com/sofascore/flashscore 是JS应用、抓正文拿不到数据，别要求抓它们。
 - 问题要求列表/逐场明细（如"每个助攻给了谁"）时，conclusion 就给完整的多行列表（仍须注明赛季/口径和来源）；证据页面正文里有明细就逐条提取，别偷懒概括。
 只输出JSON，不要其他文字：
 {"conclusion":"结论（通常一句话；列表类问题给完整多行列表），必须包含赛季/口径、数字和依据来源","confidence":"high|medium|low","need_queries":"还需要的搜索词，最多2个用|分隔，不需要留空","need_url":"需要抓取正文的URL，不需要留空"}`
+
+// englishQueries pulls the ASCII-dominant search queries out of the evidence
+// keys (the router emits one English and one Chinese query).
+func englishQueries(evidence map[string]any) []string {
+	var out []string
+	for key := range evidence {
+		q, ok := strings.CutPrefix(key, "搜索（")
+		if !ok {
+			continue
+		}
+		q = strings.TrimSuffix(q, "）")
+		cjk, total := 0, 0
+		for _, r := range q {
+			total++
+			if r >= 0x4e00 && r <= 0x9fff {
+				cjk++
+			}
+		}
+		if total > 0 && cjk*10 < total {
+			out = append(out, q)
+		}
+	}
+	return out
+}
 
 type verdictEntry struct {
 	Verdict   string    `json:"verdict"`
@@ -282,8 +308,21 @@ func (h *Handler) verifyFacts(ctx context.Context, question string, evidence map
 		return cached.Verdict
 	}
 
-	// Proactively read the first trusted source per query (2 pages max):
+	// StatMuse answers stat questions in one plain-HTML sentence: feed it
+	// the English search query directly as a cheap, high-signal source.
+	for _, q := range englishQueries(evidence) {
+		ask := "https://www.statmuse.com/fc/ask?q=" + url.QueryEscape(q)
+		if text := fetchPageText(ctx, ask, q); text != "" {
+			evidence["StatMuse直答（"+q+"）"] = text
+			h.logger.Info("verifier asked statmuse", "query", q)
+		}
+		break // one StatMuse ask is enough
+	}
+
+	// Proactively read the best trusted source per query (2 pages max):
 	// real page text beats snippets and usually saves the refine round.
+	// "Best" prefers static-HTML stat sites — a JS-app page fetch returns
+	// boilerplate without the numbers.
 	fetched := 0
 	for key, v := range evidence {
 		if fetched >= 2 {
@@ -293,16 +332,20 @@ func (h *Handler) verifyFacts(ctx context.Context, question string, evidence map
 		if !ok {
 			continue
 		}
+		best, bestRank := "", int(^uint(0)>>1)
 		for _, res := range results {
-			if res.URL == "" || !trustedSource(res.URL) {
-				continue
+			if r := trustRank(res.URL); r >= 0 && r < bestRank {
+				best, bestRank = res.URL, r
 			}
-			if text := fetchPageText(ctx, res.URL); text != "" {
-				evidence["页面正文（"+res.URL+"）"] = text
-				fetched++
-				h.logger.Info("verifier fetched source page", "for", key, "url", res.URL)
-			}
-			break
+		}
+		if best == "" {
+			continue
+		}
+		hint := strings.TrimSuffix(strings.TrimPrefix(key, "搜索（"), "）")
+		if text := fetchPageText(ctx, best, hint); text != "" {
+			evidence["页面正文（"+best+"）"] = text
+			fetched++
+			h.logger.Info("verifier fetched source page", "for", key, "url", best)
 		}
 	}
 
@@ -347,7 +390,7 @@ func (h *Handler) verifyFacts(ctx context.Context, question string, evidence map
 				}
 			}
 			if v.NeedURL != "" {
-				if text := fetchPageText(ctx, v.NeedURL); text != "" {
+				if text := fetchPageText(ctx, v.NeedURL, question); text != "" {
 					evidence["页面正文（"+v.NeedURL+"）"] = text
 					grew = true
 				}

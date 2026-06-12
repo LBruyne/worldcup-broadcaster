@@ -118,31 +118,40 @@ func ddgTargetURL(href string) string {
 }
 
 // trustedStatDomains are sources whose page text is worth fetching when
-// verifying a factual claim; ordering in search results decides which one.
+// verifying a factual claim, ordered by preference: static-HTML stat sites
+// (numbers present in fetched text) first, JS-rendered apps (fetch yields
+// boilerplate only) last.
 var trustedStatDomains = []string{
-	"fbref.com", "espn.com", "bbc.com", "bbc.co.uk", "skysports.com",
-	"premierleague.com", "transfermarkt.", "statmuse.com", "sofascore.com",
-	"flashscore.com", "worldfootball.net", "goal.com", "theguardian.com",
-	"wikipedia.org", "dongqiudi.com", "hupu.com", "zhibo8.cc",
+	"fbref.com", "transfermarkt.", "worldfootball.net", "wikipedia.org",
+	"statmuse.com", "dongqiudi.com", "hupu.com", "zhibo8.cc",
+	"bbc.com", "bbc.co.uk", "theguardian.com", "skysports.com", "goal.com",
+	"espn.com", "premierleague.com", "sofascore.com", "flashscore.com",
 }
 
-func trustedSource(rawURL string) bool {
+// trustRank returns the preference index of a URL's domain (lower is
+// better), or -1 when untrusted.
+func trustRank(rawURL string) int {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Host == "" {
-		return false
+		return -1
 	}
 	host := strings.ToLower(u.Host)
-	for _, d := range trustedStatDomains {
+	for i, d := range trustedStatDomains {
 		if strings.Contains(host, d) {
-			return true
+			return i
 		}
 	}
-	return false
+	return -1
 }
+
+func trustedSource(rawURL string) bool { return trustRank(rawURL) >= 0 }
 
 // fetchPageText downloads a page and reduces it to plain text (capped) so
 // the fact verifier can read the actual numbers instead of search snippets.
-func fetchPageText(ctx context.Context, rawURL string) string {
+// When the cleaned text overflows the cap, the excerpt is centred on the
+// first occurrence of a hint token (player name, season) so stat tables
+// deep in the page survive instead of nav boilerplate.
+func fetchPageText(ctx context.Context, rawURL, hint string) string {
 	cctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(cctx, http.MethodGet, rawURL, nil)
@@ -167,10 +176,37 @@ func fetchPageText(ctx context.Context, rawURL string) string {
 	text = tagRe.ReplaceAllString(text, " ")
 	text = html.UnescapeString(text)
 	text = strings.TrimSpace(spaceRe.ReplaceAllString(text, " "))
-	if runes := []rune(text); len(runes) > 3500 {
-		text = string(runes[:3500])
+	return excerptAround(text, hint, 4000)
+}
+
+// excerptAround returns up to max runes of text, centred on the first
+// occurrence of any whitespace-separated hint token (≥3 runes, checked
+// case-insensitively). Without a hit it falls back to the head of the text.
+func excerptAround(text, hint string, max int) string {
+	runes := []rune(text)
+	if len(runes) <= max {
+		return text
 	}
-	return text
+	start := 0
+	lower := strings.ToLower(text)
+	for _, tok := range strings.Fields(strings.ToLower(hint)) {
+		if len([]rune(tok)) < 3 {
+			continue
+		}
+		if i := strings.Index(lower, tok); i >= 0 {
+			// leave a third of the window before the hit for context
+			pre := []rune(lower[:i])
+			start = len(pre) - max/3
+			if start < 0 {
+				start = 0
+			}
+			break
+		}
+	}
+	if start+max > len(runes) {
+		start = len(runes) - max
+	}
+	return string(runes[start : start+max])
 }
 
 func cleanHTML(s string) string {
