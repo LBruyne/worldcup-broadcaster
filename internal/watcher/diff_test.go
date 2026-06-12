@@ -143,3 +143,23 @@ func TestRenderSubstitutionDirection(t *testing.T) {
 	}
 	t.Fatal("kolo muani substitution not found")
 }
+
+// Event text uses FIFA names ("Korea Republic") while the header uses ESPN
+// names ("South Korea"): the score parser must tolerate the variants.
+func TestScoreFromTextNameVariants(t *testing.T) {
+	h, a, ok := scoreFromText(
+		"Goal! Korea Republic 0, Czechia 1. Ladislav Krejcí (Czechia) header.",
+		"South Korea", "Czechia")
+	if !ok || h != "0" || a != "1" {
+		t.Errorf("variant match = %q:%q ok=%v", h, a, ok)
+	}
+	// swapped order still resolves
+	h, a, ok = scoreFromText("Goal! Czechia 2, Korea Republic 1.", "South Korea", "Czechia")
+	if !ok || h != "1" || a != "2" {
+		t.Errorf("swapped = %q:%q ok=%v", h, a, ok)
+	}
+	// unrelated teams must not match
+	if _, _, ok := scoreFromText("Goal! Brazil 1, Ghana 0.", "South Korea", "Czechia"); ok {
+		t.Error("unrelated teams matched")
+	}
+}

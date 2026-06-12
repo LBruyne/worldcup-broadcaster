@@ -82,12 +82,32 @@ func scoreFromText(text, homeName, awayName string) (home, away string, ok bool)
 	}
 	a, as, b, bs := strings.TrimSpace(m[1]), m[2], strings.TrimSpace(m[3]), m[4]
 	switch {
-	case strings.HasSuffix(a, homeName) && b == awayName:
+	case teamNamesMatch(a, homeName) && teamNamesMatch(b, awayName):
 		return as, bs, true
-	case strings.HasSuffix(a, awayName) && b == homeName:
+	case teamNamesMatch(a, awayName) && teamNamesMatch(b, homeName):
 		return bs, as, true
 	}
 	return "", "", false
+}
+
+// teamNamesMatch tolerates feed name variants ("Korea Republic" in event
+// text vs "South Korea" in the header) by requiring one shared word of at
+// least 4 letters, or a suffix relation.
+func teamNamesMatch(a, b string) bool {
+	a, b = strings.ToLower(a), strings.ToLower(b)
+	if a == b || strings.HasSuffix(a, b) || strings.HasSuffix(b, a) {
+		return true
+	}
+	bw := map[string]bool{}
+	for _, w := range strings.Fields(b) {
+		bw[w] = true
+	}
+	for _, w := range strings.Fields(a) {
+		if len(w) >= 4 && bw[w] {
+			return true
+		}
+	}
+	return false
 }
 
 func classify(k *espn.KeyEvent) EventType {
