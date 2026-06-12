@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -129,7 +130,7 @@ needs 可选值（按需多选，无需数据时为空数组）：
 - "standings"：小组积分榜/出线形势
 - "leaderboards"：射手榜/助攻榜
 - "today"：今明两天的比赛
-search：以下情况【必须】填搜索关键词：问题涉及任何具体球员（人名）的数据/近况/效力球队/进球数，或本届世界杯数据之外的足球事实（历史战绩、转会、伤病、俱乐部赛事等）。可以给最多2个查询（用|分隔），中英文各一个效果最好。纯闲聊/对线/观点类问题才留空。
+search：以下情况【必须】填搜索关键词：问题涉及任何具体球员（含外号：B费、丁丁、拉师傅等都是球员）或球队的数据/近况/表现/成绩/评价/比较/排名/逐场明细，或本届世界杯数据之外的足球事实（历史战绩、转会、伤病、俱乐部赛事等）。"XX表现怎么样""谁成绩好"这类评价比较类问题也是事实数据问题，必须搜索。可以给最多2个查询（用|分隔），中英文各一个效果最好，外号要换成正式名字（B费→Bruno Fernandes）。纯闲聊/对线/观点类问题才留空。
 搜索词里的相对时间必须先换算成具体赛季再写入：欧洲联赛赛季从每年8月跨到次年5月，按给出的"今天"换算（例：今天是2026年6月，刚结束的"上赛季/本赛季"=2025-26赛季，再往前一年才是2024-25）。涉及赛季数据时，搜索词必须同时含球员/球队名、换算后的具体赛季（如"2025-26"）、联赛或赛事名、指标名（进球/助攻等）。
 difficulty：涉及具体球员/球队事实数据的问题、需要多步推理/复杂分析/出线概率计算的，一律 hard；纯闲聊对线为 easy。`
 
@@ -197,6 +198,15 @@ func (h *Handler) grounding(ctx context.Context, question string) (string, bool)
 			data["今日数据"] = todays
 		}
 	}
+	// Safety net: the no-thinking router sometimes misjudges evaluation or
+	// comparison questions as banter. Anything carrying a season/stat keyword
+	// must hit the search+verify path — fall back to the raw question as the
+	// query (the verifier can refine it in its second round).
+	if r.Search == "" && factualQuestionRe.MatchString(question) {
+		r.Search = question
+		r.Difficulty = "hard"
+		h.logger.Info("router missed factual question, forcing search", "question", question)
+	}
 	searched := false
 	evidence := map[string]any{}
 	for _, q := range strings.Split(r.Search, "|") {
@@ -237,14 +247,20 @@ func (h *Handler) grounding(ctx context.Context, question string) (string, bool)
 	return string(raw), think
 }
 
+// factualQuestionRe catches questions that must never skip the search path:
+// season references, stat words, evaluation/comparison asks.
+var factualQuestionRe = regexp.MustCompile(
+	`上赛季|本赛季|这赛季|赛季|去年|今年|最近|数据|进球|助攻|零封|扑救|表现|成绩|排名|纪录|记录|历史|交锋|转会|身价|伤病|受伤|多少|几个|几球|几次|金靴|金球|冠军|夺冠|出场|首发|评分`)
+
 const verifierPrompt = `你是足球数据核实员。给你一个问题和若干网络证据（搜索结果的标题/摘要/URL，可能还有权威来源的页面正文）。你的任务：深入思考，裁决出唯一、准确的事实结论。
 规则：
 - 先确定时间口径：会给你"今天"的日期。欧洲联赛赛季从每年8月跨到次年5月（例：今天是2026年6月，则"上赛季"=2025-26赛季）。
 - 严格区分统计口径：联赛进球≠各项赛事总进球≠生涯总进球≠为国家队进球；自媒体/视频标题（YouTube等）不可信；优先权威统计源（fbref、ESPN、联赛官网、Transfermarkt、StatMuse、维基百科的正文数据）。
 - 多个来源数字冲突时，分析冲突原因（口径不同？赛季不同？来源不可靠？），裁决出最可信的唯一答案。
 - 现有证据不足以下结论时，可要求补充搜索（换更精确的关键词）或抓取某条搜索结果URL的正文。
-只输出一行JSON，不要其他文字：
-{"conclusion":"一句话结论，必须包含赛季/口径、数字和依据来源","confidence":"high|medium|low","need_queries":"还需要的搜索词，最多2个用|分隔，不需要留空","need_url":"需要抓取正文的URL，不需要留空"}`
+- 问题要求列表/逐场明细（如"每个助攻给了谁"）时，conclusion 就给完整的多行列表（仍须注明赛季/口径和来源）；证据页面正文里有明细就逐条提取，别偷懒概括。
+只输出JSON，不要其他文字：
+{"conclusion":"结论（通常一句话；列表类问题给完整多行列表），必须包含赛季/口径、数字和依据来源","confidence":"high|medium|low","need_queries":"还需要的搜索词，最多2个用|分隔，不需要留空","need_url":"需要抓取正文的URL，不需要留空"}`
 
 type verdictEntry struct {
 	Verdict   string    `json:"verdict"`

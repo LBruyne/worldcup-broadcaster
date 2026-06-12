@@ -204,3 +204,38 @@ func TestTrustedSource(t *testing.T) {
 }
 
 func timeNow() time.Time { return time.Now() }
+
+// Evaluation/comparison questions the router misroutes as banter must be
+// caught by the deterministic factual-keyword guard and forced to search.
+func TestFactualGuardForcesSearch(t *testing.T) {
+	llm := &routerLLM{
+		route:   `{"needs":[],"difficulty":"easy","search":""}`,
+		verdict: `{"conclusion":"B费2025-26赛季英超9球14助（来源:fbref）","confidence":"high"}`,
+		answer:  "ok",
+	}
+	h, sender := newHandler(t, llm)
+	q := "b费上赛季表现怎么样"
+	h.profiles.store.SaveJSON("wcdb", "search-"+sanitizeKey(q),
+		searchEntry{Results: []byte(`[{"title":"Bruno Fernandes 25/26 stats","snippet":"x"}]`), FetchedAt: timeNow()})
+	h.OnGroupMessage(context.Background(), 861376113, 0, "小明", "/ask "+q)
+	deadlineWait(t, sender, 1)
+	if !strings.Contains(llm.askUser, "数据核实结论") {
+		t.Errorf("factual guard did not force search+verify: %.300s", llm.askUser)
+	}
+	if !strings.Contains(llm.askUser, "今天") {
+		t.Error("ask payload must carry today's date")
+	}
+}
+
+func TestFactualGuardSkipsBanter(t *testing.T) {
+	llm := &routerLLM{
+		route:  `{"needs":[],"difficulty":"easy","search":""}`,
+		answer: "ok",
+	}
+	h, sender := newHandler(t, llm)
+	h.OnGroupMessage(context.Background(), 861376113, 0, "小明", "/ask 你是谁派来的")
+	deadlineWait(t, sender, 1)
+	if strings.Contains(llm.askUser, "数据核实结论") || llm.verifyUser != "" {
+		t.Error("pure banter must not trigger the verify pipeline")
+	}
+}
