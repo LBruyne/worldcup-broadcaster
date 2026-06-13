@@ -1,1 +1,4 @@
 qrcode-*.png
+
+# Real config with secrets (keys/tokens/groups) — never commit; use config.example.yaml as the template.
+config.yaml
