@@ -147,7 +147,7 @@ func NewHandler(opts Options, sender Sender, llm LLM, dig *digest.Digest, client
 		replyQ:     make(map[int64]chan string),
 		styles:     make(map[int64]*groupStyle),
 		styleBusy:  make(map[int64]bool),
-		askQueue:   make(chan askTask, 16),
+		askQueue:   make(chan askTask, 32),
 	}
 }
 
@@ -194,14 +194,14 @@ func (h *Handler) AnnounceRecovery() {
 // ReplayMissedQA scans each group's recent history for /ask or @-bot
 // questions that arrived after the bot's last message (i.e. while it was
 // offline) and answers them in order. Bounded by recency and count so it
-// never floods the group.
+// never floods the group (≤10 per group, within 12h).
 func (h *Handler) ReplayMissedQA(ctx context.Context) {
 	if h.histReader == nil {
 		return
 	}
-	cutoff := time.Now().Add(-2 * time.Hour).Unix()
+	cutoff := time.Now().Add(-12 * time.Hour).Unix()
 	for gid := range h.groups {
-		msgs, err := h.histReader.GroupHistory(gid, 30)
+		msgs, err := h.histReader.GroupHistory(gid, 60)
 		if err != nil {
 			h.logger.Error("recovery history fetch failed", "group", gid, "error", err)
 			continue
@@ -222,8 +222,8 @@ func (h *Handler) ReplayMissedQA(ctx context.Context) {
 				missed = append(missed, m)
 			}
 		}
-		if len(missed) > 3 {
-			missed = missed[len(missed)-3:] // answer at most the 3 most recent
+		if len(missed) > 10 {
+			missed = missed[len(missed)-10:] // answer at most the 10 most recent
 		}
 		for _, m := range missed {
 			q := stripQuestionPrefix(m.Text)

@@ -185,7 +185,7 @@ func main() {
 		if qaHandler != nil {
 			qaHandler.AnnounceRecovery()
 		}
-		bot.FlushPending(3 * time.Hour)
+		bot.FlushPending(12 * time.Hour)
 		if qaHandler != nil {
 			qaHandler.ReplayMissedQA(ctx)
 		}

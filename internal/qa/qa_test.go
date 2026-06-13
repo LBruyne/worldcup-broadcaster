@@ -498,8 +498,8 @@ func TestAskQueueOverflowRejected(t *testing.T) {
 	llm := &blockingLLM{block: block}
 	h, sender := newHandler(t, llm)
 	ctx := context.Background()
-	// 1 in-flight + 16 queued + N rejected
-	for i := 0; i < 25; i++ {
+	// 1 in-flight + 32 queued + N rejected
+	for i := 0; i < 45; i++ {
 		h.OnGroupMessage(ctx, 861376113, 0, "轰炸机", fmt.Sprintf("/ask 问题%d", i))
 	}
 	deadlineWait(t, sender, 1) // at least one rejection notice arrives sync
