@@ -178,11 +178,16 @@ func (h *Handler) SetMemberLister(m MemberLister) { h.members = m }
 // SetHistoryReader wires the OneBot group-history API (optional).
 func (h *Handler) SetHistoryReader(r HistoryReader) { h.histReader = r }
 
-// AnnounceRecovery posts a "back online" notice plus the command list to
-// every group after the bot recovers from a forced QQ logout.
+// RecoveryMessage is the "back online" notice plus the command list, posted
+// after the bot recovers from a forced QQ logout.
+func RecoveryMessage() string {
+	return "🟢 刚刚被QQ强制下线了一会儿，现在已经恢复正常啦！下面把能用的命令再贴一遍 👇\n\n" + helpText
+}
+
+// AnnounceRecovery posts the recovery notice to every group.
 func (h *Handler) AnnounceRecovery() {
 	for gid := range h.groups {
-		h.reply(gid, "🟢 刚刚被QQ强制下线了一会儿，现在已经恢复正常啦！下面把能用的命令再贴一遍 👇\n\n"+helpText)
+		h.reply(gid, RecoveryMessage())
 	}
 }
 

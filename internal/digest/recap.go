@@ -19,6 +19,12 @@ type recapGoal struct {
 	OwnGoal bool   `json:"own_goal,omitempty"`
 }
 
+type recapCard struct {
+	Player string `json:"player"`
+	Team   string `json:"team"`
+	Clock  string `json:"clock"`
+}
+
 type recapMatch struct {
 	ID        string          `json:"id"`
 	Stage     string          `json:"stage"`
@@ -30,7 +36,7 @@ type recapMatch struct {
 	SoHome    int             `json:"shootout_home,omitempty"`
 	SoAway    int             `json:"shootout_away,omitempty"`
 	Goals     []recapGoal     `json:"goals,omitempty"`
-	RedCards  []string        `json:"red_cards,omitempty"`
+	RedCards  []recapCard     `json:"red_cards,omitempty"`
 	Finished  bool            `json:"finished"`
 	Standings json.RawMessage `json:"group_standings,omitempty"`
 }
@@ -130,14 +136,32 @@ func fillRecapDetails(rm *recapMatch, sum *espn.Summary) {
 			rm.Goals = append(rm.Goals, g)
 		case strings.Contains(text, "Red Card"):
 			if len(k.Participants) > 0 {
-				rm.RedCards = append(rm.RedCards,
-					fmt.Sprintf("%s（%s，%s）", k.Participants[0].Athlete.DisplayName, cnmap.Name(k.Team.DisplayName), k.Clock.DisplayValue))
+				rm.RedCards = append(rm.RedCards, recapCard{
+					Player: k.Participants[0].Athlete.DisplayName,
+					Team:   k.Team.DisplayName,
+					Clock:  k.Clock.DisplayValue,
+				})
 			}
 		}
 	}
 }
 
 func (d *Digest) renderRecap(date string, matches []recapMatch) string {
+	// Batch-translate every player name to Chinese once before rendering.
+	cn := func(s string) string { return s }
+	if d.names != nil {
+		var all []string
+		for _, rm := range matches {
+			for _, g := range rm.Goals {
+				all = append(all, g.Player, g.Assist)
+			}
+			for _, rc := range rm.RedCards {
+				all = append(all, rc.Player)
+			}
+		}
+		d.names.EnsureBatch(context.Background(), all)
+		cn = d.names.Name
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "☀️ 下午好！%s 的战报新鲜出炉～\n🏆 2026世界杯 当日赛果（%d场）", displayDate(date), len(matches))
 	for _, rm := range matches {
@@ -161,13 +185,13 @@ func (d *Digest) renderRecap(date string, matches []recapMatch) string {
 			} else if g.OwnGoal {
 				tag = "（乌龙）"
 			}
-			fmt.Fprintf(&b, "\n⚽ %s %s%s（%s）", g.Clock, g.Player, tag, cnmap.Name(g.Team))
+			fmt.Fprintf(&b, "\n⚽ %s %s%s（%s）", g.Clock, cn(g.Player), tag, cnmap.Name(g.Team))
 			if g.Assist != "" {
-				fmt.Fprintf(&b, " 助攻:%s", g.Assist)
+				fmt.Fprintf(&b, " 助攻:%s", cn(g.Assist))
 			}
 		}
 		for _, rc := range rm.RedCards {
-			fmt.Fprintf(&b, "\n🟥 %s", rc)
+			fmt.Fprintf(&b, "\n🟥 %s（%s，%s）", cn(rc.Player), cnmap.Name(rc.Team), rc.Clock)
 		}
 	}
 	return b.String()

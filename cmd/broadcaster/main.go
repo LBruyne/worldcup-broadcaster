@@ -42,6 +42,7 @@ func main() {
 	dateOverride := flag.String("date", "", "China date (2006-01-02) override for manual runs")
 	simFixture := flag.String("simulate-fixture", "", "replay a summary fixture's events to the group and exit (live-flow drill)")
 	testAlert := flag.Bool("test-alert", false, "send a test alert to admin_qq and exit")
+	announceRecovery := flag.Bool("announce-recovery", false, "post the recovery notice + command list to all groups and exit")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
@@ -80,7 +81,6 @@ func main() {
 		alerter.SetTextSender(ding)
 		logger.Info("dingtalk alert channel enabled")
 	}
-	startQRServer(ctx, cfg, logger)
 	bot.OnSendError = func(err error) { alerter.Alert("onebot", "QQ消息发送失败: "+err.Error()) }
 	bot.Start(ctx)
 
@@ -105,6 +105,13 @@ func main() {
 	// One-shot alert-path test: verifies admin private-message delivery.
 	if *testAlert {
 		alerter.Alert("test", "这是一条测试告警：如果你在QQ私聊里看到它，说明告警链路畅通 ✅")
+		return
+	}
+
+	// One-shot recovery announcement to all groups.
+	if *announceRecovery {
+		bot.EnqueueGroup(qa.RecoveryMessage())
+		bot.WaitIdle(ctx)
 		return
 	}
 
@@ -184,6 +191,7 @@ func main() {
 		}
 	}
 
+	startQRServer(ctx, cfg, logger)
 	if cfg.OneBot.KeepaliveIntervalMin > 0 {
 		go qqKeepalive(ctx, cfg, bot, alerter, ding, onRecovery, logger)
 	}
