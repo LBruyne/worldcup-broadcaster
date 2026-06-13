@@ -23,8 +23,10 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 
 	"worldcup-broadcaster/internal/alert"
+	"worldcup-broadcaster/internal/chatops"
 	"worldcup-broadcaster/internal/config"
 	"worldcup-broadcaster/internal/digest"
+	"worldcup-broadcaster/internal/dingbot"
 	"worldcup-broadcaster/internal/dingtalk"
 	"worldcup-broadcaster/internal/espn"
 	"worldcup-broadcaster/internal/llm"
@@ -201,6 +203,7 @@ func main() {
 	if cfg.OneBot.KeepaliveIntervalMin > 0 {
 		go qqKeepalive(ctx, cfg, bot, alerter, ding, onRecovery, logger)
 	}
+	startDingChatOps(ctx, cfg, alerter, logger)
 
 	sched := newMatchScheduler(w, espnClient, alerter, logger)
 
@@ -377,6 +380,34 @@ func startQRServer(ctx context.Context, cfg *config.Config, logger *slog.Logger)
 		logger.Info("qr scan page serving", "addr", ob.QRServeAddr, "path", prefix+"/")
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("qr server failed", "error", err)
+		}
+	}()
+}
+
+// startDingChatOps connects the DingTalk Stream bot (if enabled) so admins can
+// drive Claude Code on this repo from a DingTalk group. Best-effort: failures
+// are logged + alerted and never block the broadcaster.
+func startDingChatOps(ctx context.Context, cfg *config.Config, alerter *alert.Alerter, logger *slog.Logger) {
+	db := cfg.DingBot
+	if !db.Enabled {
+		return
+	}
+	if db.AppKey == "" || db.AppSecret == "" {
+		logger.Warn("dingtalk chatops enabled but app_key/app_secret missing; skipping")
+		return
+	}
+	handler, err := chatops.New(db, logger)
+	if err != nil {
+		logger.Error("chatops init failed", "error", err)
+		return
+	}
+	bot := dingbot.New(db.AppKey, db.AppSecret, logger)
+	bot.SetHandler(handler.Handle)
+	logger.Info("dingtalk chatops enabled", "admins", len(db.AdminStaffIDs))
+	go func() {
+		if err := bot.Start(ctx); err != nil && ctx.Err() == nil {
+			logger.Error("dingtalk stream exited", "error", err)
+			alerter.Alert("dingbot", "钉钉ChatOps连接退出: "+err.Error())
 		}
 	}()
 }
