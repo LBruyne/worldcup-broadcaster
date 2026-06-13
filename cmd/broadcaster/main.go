@@ -274,7 +274,20 @@ func qqKeepalive(ctx context.Context, cfg *config.Config, bot *onebot.Client, al
 		consecutive++
 		logger.Error("qq offline or napcat unreachable", "error", err, "online", online, "consecutive", consecutive)
 		if consecutive < 2 {
-			continue // a single blip (e.g. napcat restarting) is not an outage
+			// Don't wait a whole poll interval to confirm an outage: re-probe
+			// after a short delay so a real kick is detected in ~20s instead of
+			// one full interval later. A single blip (napcat restarting) clears.
+			select {
+			case <-time.After(20 * time.Second):
+			case <-ctx.Done():
+				return
+			}
+			if online2, err2 := bot.GetStatus(); err2 == nil && online2 {
+				consecutive = 0
+				continue
+			}
+			consecutive++
+			logger.Error("qq still offline on quick re-probe", "consecutive", consecutive)
 		}
 		if napcatAlive(cfg.OneBot.WebUIURL) {
 			// NapCat is up but QQ is logged out. Try ONE automatic restart
@@ -351,11 +364,27 @@ func startQRServer(ctx context.Context, cfg *config.Config, logger *slog.Logger)
 	mux.HandleFunc(prefix+"/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Bot 扫码登录</title>
-<body style="text-align:center;font-family:sans-serif;padding-top:24px">
-<h3>用 Bot 号的手机QQ扫码登录</h3>
-<img id="q" src="qrcode.png" width="280" style="border:1px solid #ddd">
-<p style="color:#888">二维码每 5 秒自动刷新，不会过期；扫到“登录确认”即可关闭本页</p>
-<script>setInterval(function(){document.getElementById('q').src='qrcode.png?t='+Date.now()},5000)</script>`)
+<body style="text-align:center;font-family:-apple-system,sans-serif;padding:20px 16px;max-width:430px;margin:0 auto">
+<h3>用 Bot 号手机QQ登录</h3>
+<img id="q" src="qrcode.png" style="width:78%;max-width:300px;border:1px solid #ddd;border-radius:8px">
+<div style="margin:12px 0">
+<button id="t" onclick="tg()" style="padding:9px 18px;font-size:15px;border:0;background:#07c160;color:#fff;border-radius:6px">⏸ 暂停刷新好保存</button>
+</div>
+<div style="text-align:left;color:#444;font-size:14px;line-height:1.75;background:#f6f6f6;border-radius:8px;padding:12px 14px">
+<b>📱 想在这台手机上直接登录（不用另一台扫）：</b><br>
+① 先点上面「暂停刷新」<br>
+② <b>长按二维码 → 存到相册</b><br>
+③ 打开<b>手机QQ → 扫一扫 → 右上角「相册」→ 选刚存的码</b><br>
+④ 按提示确认登录，扫完回来点「继续」<br>
+<span style="color:#999">二维码约1分钟换一次，存了尽快扫；扫到“登录确认”即可关本页</span>
+</div>
+<script>
+var on=true,t=setInterval(rf,5000);
+function rf(){document.getElementById('q').src='qrcode.png?t='+Date.now()}
+function tg(){on=!on;var b=document.getElementById('t');
+ if(on){t=setInterval(rf,5000);rf();b.textContent='⏸ 暂停刷新好保存'}
+ else{clearInterval(t);b.textContent='▶ 继续刷新'}}
+</script>`)
 	})
 	mux.HandleFunc(prefix+"/qrcode.png", func(w http.ResponseWriter, r *http.Request) {
 		if ob.QRSyncCmd != "" {
