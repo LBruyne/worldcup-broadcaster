@@ -86,8 +86,14 @@ func main() {
 
 	var llmClient digest.LLM
 	if cfg.LLM.APIKey != "" {
-		llmClient = llm.New(cfg.LLM.BaseURL, cfg.LLM.APIKey, cfg.LLM.Model,
-			time.Duration(cfg.LLM.TimeoutSec)*time.Second)
+		timeout := time.Duration(cfg.LLM.TimeoutSec) * time.Second
+		if cfg.LLM.ResolvedFormat() == "anthropic" {
+			llmClient = llm.NewAnthropic(cfg.LLM.BaseURL, cfg.LLM.APIKey, cfg.LLM.Model,
+				timeout, cfg.LLM.WebSearch)
+			logger.Info("llm using anthropic format (deepseek native)", "web_search", cfg.LLM.WebSearch)
+		} else {
+			llmClient = llm.New(cfg.LLM.BaseURL, cfg.LLM.APIKey, cfg.LLM.Model, timeout)
+		}
 	}
 	dig := digest.New(espnClient, llmClient, st, bot, alerter.Alert, logger)
 	w := watcher.New(espnClient, bot, st, alerter.Alert, logger,

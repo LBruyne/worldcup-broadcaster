@@ -35,9 +35,14 @@ espn:
   poll_interval_sec: 20                # 比赛进行中的数据轮询间隔（秒）
 
 llm:
+  # 想让 /ask 用 DeepSeek 官方 Anthropic 端点的"原生联网搜索+思考"（替代旧的 DuckDuckGo 抓取）：
+  #   base_url 改成 https://api.deepseek.com/anthropic ，api_format 留空会自动识别为 anthropic，
+  #   web_search 设 true。模型用 deepseek-v4-pro。
   base_url: "https://api.deepseek.com"
   model: "deepseek-v4-pro"
   api_key: ""                          # ←必填：DeepSeek API Key（也可用环境变量 LLM_API_KEY）
+  api_format: ""                       # openai（默认 /chat/completions）| anthropic（/v1/messages，支持原生 web_search）；留空按 base_url 自动判断
+  web_search: false                    # 仅 anthropic 格式生效：开启 DeepSeek 原生联网搜索，/ask 由模型自主联网核实
   timeout_sec: 180
 
 schedule:
@@ -56,6 +61,22 @@ events:                                # 实时播报开关
   period_change: true                  # 进入加时/加时各节点/进入点球大战
   shootout_round: true                 # 点球大战逐轮播报
   fulltime: true                       # 终场（含最终比分）
+
+# 钉钉 ChatOps：在钉钉群里 @机器人 发命令，驱动 Claude Code 改本仓库代码并回贴结果。
+# 需要"企业内部应用-机器人"并开启 Stream 模式（无需公网），把 AppKey/AppSecret 填进来。
+# 仅 admin_staff_ids 里的人能跑改动类命令。改动在隔离的 git worktree + 分支里进行，不碰 master。
+dingtalk_bot:
+  enabled: false                       # ←设 true 开启
+  app_key: ""                          # ←企业内部应用 AppKey（也可用环境变量 DINGBOT_APP_KEY）
+  app_secret: ""                       # ←AppSecret（也可用环境变量 DINGBOT_APP_SECRET）
+  admin_staff_ids: []                  # ←有权发命令的人的 senderStaffId 列表，如 ["manager01"]
+  worktree_dir: ""                     # Claude 干活的隔离 worktree 目录；留空=<仓库>-chatops 同级目录
+  repo_dir: ""                         # 源仓库路径（用于创建 worktree）；留空=当前工作目录
+  claude_bin: "claude"                 # claude CLI 路径
+  claude_model: ""                     # 指挥用的模型；留空=claude 默认（真·Claude，代码质量最好）
+  permission_mode: "acceptEdits"       # 改动类命令的权限模式：acceptEdits（自动改文件）/ plan / default
+  allowed_tools: []                    # 额外 --allowedTools 项，如 ["Bash(go test:*)"]
+  max_run_min: 20                      # 单条命令硬超时（分钟）
 
 data_dir: "./data"                     # 抓取数据与去重状态落盘目录
 

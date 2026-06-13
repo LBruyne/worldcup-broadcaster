@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -83,10 +84,50 @@ type ESPN struct {
 }
 
 type LLM struct {
-	BaseURL    string `yaml:"base_url"`
-	Model      string `yaml:"model"`
-	APIKey     string `yaml:"api_key"`
-	TimeoutSec int    `yaml:"timeout_sec"`
+	BaseURL string `yaml:"base_url"`
+	Model   string `yaml:"model"`
+	APIKey  string `yaml:"api_key"`
+	// APIFormat selects the wire protocol: "openai" (chat/completions) or
+	// "anthropic" (Messages API, enables DeepSeek's native web_search). Empty
+	// auto-detects "anthropic" when base_url ends with /anthropic.
+	APIFormat string `yaml:"api_format"`
+	// WebSearch enables the built-in web_search server tool (anthropic format
+	// only); gives /ask model-driven search instead of the DuckDuckGo scraper.
+	WebSearch  bool `yaml:"web_search"`
+	TimeoutSec int  `yaml:"timeout_sec"`
+}
+
+// ResolvedFormat returns the effective API format, auto-detecting "anthropic"
+// from an /anthropic base URL when api_format is unset.
+func (l LLM) ResolvedFormat() string {
+	if l.APIFormat != "" {
+		return l.APIFormat
+	}
+	if strings.HasSuffix(strings.TrimRight(l.BaseURL, "/"), "/anthropic") {
+		return "anthropic"
+	}
+	return "openai"
+}
+
+// DingBot configures the DingTalk ChatOps robot: a Stream-mode connection that
+// lets admins drive Claude Code on this repo from a DingTalk group. Disabled
+// unless Enabled is true and credentials are set.
+type DingBot struct {
+	Enabled       bool     `yaml:"enabled"`
+	AppKey        string   `yaml:"app_key"`        // enterprise internal app AppKey (ClientId)
+	AppSecret     string   `yaml:"app_secret"`     // AppSecret (ClientSecret)
+	AdminStaffIDs []string `yaml:"admin_staff_ids"` // senderStaffId allowlist for mutating commands
+	// WorktreeDir is an isolated git worktree where Claude Code runs, so the
+	// live service's own source tree is never edited mid-flight. Empty = a
+	// sibling "<repo>-chatops" dir.
+	WorktreeDir string `yaml:"worktree_dir"`
+	RepoDir     string `yaml:"repo_dir"`     // source repo to create the worktree from; empty = cwd
+	ClaudeBin   string `yaml:"claude_bin"`   // claude CLI path; default "claude"
+	ClaudeModel string `yaml:"claude_model"` // override model; empty = claude default (real Claude)
+	// PermissionMode for mutating runs: acceptEdits (default) / plan / default.
+	PermissionMode string   `yaml:"permission_mode"`
+	AllowedTools   []string `yaml:"allowed_tools"` // extra --allowedTools entries
+	MaxRunMin      int      `yaml:"max_run_min"`   // hard timeout per command; default 20
 }
 
 type Schedule struct {
@@ -122,6 +163,7 @@ type Config struct {
 	Schedule Schedule `yaml:"schedule"`
 	Events   Events   `yaml:"events"`
 	QA       QA       `yaml:"qa"`
+	DingBot  DingBot  `yaml:"dingtalk_bot"`
 	DataDir  string   `yaml:"data_dir"`
 	Log      Log      `yaml:"log"`
 
@@ -156,6 +198,11 @@ func defaults() *Config {
 			BaseURL:    "https://api.deepseek.com",
 			Model:      "deepseek-v4-pro",
 			TimeoutSec: 180,
+		},
+		DingBot: DingBot{
+			ClaudeBin:      "claude",
+			PermissionMode: "acceptEdits",
+			MaxRunMin:      20,
 		},
 		Schedule: Schedule{
 			Timezone:    "Asia/Shanghai",
@@ -192,6 +239,12 @@ func Load(path string) (*Config, error) {
 	}
 	if v := os.Getenv("ONEBOT_ACCESS_TOKEN"); v != "" {
 		cfg.OneBot.AccessToken = v
+	}
+	if v := os.Getenv("DINGBOT_APP_KEY"); v != "" {
+		cfg.DingBot.AppKey = v
+	}
+	if v := os.Getenv("DINGBOT_APP_SECRET"); v != "" {
+		cfg.DingBot.AppSecret = v
 	}
 
 	loc, err := time.LoadLocation(cfg.Schedule.Timezone)

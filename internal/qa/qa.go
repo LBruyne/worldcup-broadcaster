@@ -54,6 +54,22 @@ type ThinkingLLM interface {
 	GenerateThink(ctx context.Context, system, user string, think bool) (string, error)
 }
 
+// NativeSearchLLM is implemented by an LLM that performs its own web search
+// (DeepSeek's Anthropic endpoint with the web_search tool). When present, the
+// QA layer skips the legacy DuckDuckGo scrape + verify pipeline and lets the
+// model search; authoritative ESPN data is still supplied inline.
+type NativeSearchLLM interface {
+	NativeSearch() bool
+}
+
+// nativeSearch reports whether the active LLM searches the web on its own.
+func (h *Handler) nativeSearch() bool {
+	if ns, ok := h.llm.(NativeSearchLLM); ok {
+		return ns.NativeSearch()
+	}
+	return false
+}
+
 type ChatMsg struct {
 	Nickname string `json:"nickname"`
 	Text     string `json:"text"`

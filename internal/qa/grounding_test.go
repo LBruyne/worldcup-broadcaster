@@ -72,6 +72,38 @@ func TestGroundingPipeline(t *testing.T) {
 	}
 }
 
+// nativeLLM is a routerLLM that also advertises native web search, so the
+// grounding layer must skip the DuckDuckGo scrape + verify pipeline.
+type nativeLLM struct{ routerLLM }
+
+func (n *nativeLLM) NativeSearch() bool { return true }
+
+// With a native-search LLM, a factual question must NOT trigger the manual
+// verifier or inject DuckDuckGo evidence, but authoritative ESPN data is still
+// assembled inline and thinking stays on for factual questions.
+func TestNativeSearchSkipsDuckDuckGo(t *testing.T) {
+	llm := &nativeLLM{routerLLM{
+		route:  `{"needs":["standings"],"difficulty":"hard","search":"哈兰德 进球|Haaland goals"}`,
+		answer: "哈兰德上赛季英超进球很猛",
+	}}
+	h, sender := newHandler(t, llm)
+	h.OnGroupMessage(context.Background(), 861376113, 0, "小明", "/ask 哈兰德上赛季进了多少球")
+	deadlineWait(t, sender, 1)
+
+	if llm.verifyUser != "" {
+		t.Error("native search must skip the fact verifier")
+	}
+	if strings.Contains(llm.askUser, "网络搜索结果") || strings.Contains(llm.askUser, "数据核实结论") {
+		t.Errorf("native search must not inject DuckDuckGo evidence: %.300s", llm.askUser)
+	}
+	if !strings.Contains(llm.askUser, "小组积分榜") {
+		t.Errorf("ESPN standings still expected inline: %.300s", llm.askUser)
+	}
+	if !llm.askThink {
+		t.Error("factual question must enable thinking under native search")
+	}
+}
+
 func TestGroundingEasyNoThinking(t *testing.T) {
 	llm := &routerLLM{
 		route:  `{"needs":[],"difficulty":"easy","search":""}`,

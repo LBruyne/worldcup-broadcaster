@@ -229,6 +229,22 @@ func (h *Handler) grounding(ctx context.Context, question string) (string, bool)
 			matchAttached = true
 		}
 	}
+	// When the LLM searches the web itself, skip the legacy DuckDuckGo scrape +
+	// verify pipeline entirely: the assembled ESPN data above is the inline
+	// authoritative grounding, and the model fetches any other fact on its own.
+	if h.nativeSearch() {
+		think := r.Difficulty == "hard" || factualQuestionRe.MatchString(question)
+		if len(data) == 0 {
+			data["今日数据"] = json.RawMessage(h.liveData(ctx))
+		}
+		raw, err := json.Marshal(data)
+		if err != nil {
+			return "{}", think
+		}
+		h.logger.Info("question grounded (native search)",
+			"needs", r.Needs, "difficulty", r.Difficulty, "think", think)
+		return string(raw), think
+	}
 	// Drop the web search only for questions answerable purely from the
 	// match feed (lineup/score/events) — searching those surfaces some
 	// other match entirely. A question that also reaches beyond the match
