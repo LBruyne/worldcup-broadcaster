@@ -1,0 +1,5 @@
+{"type":"system","subtype":"hook_started","hook_id":"abc","hook_name":"SessionStart:startup"}
+{"type":"system","subtype":"init","cwd":"/tmp","model":"claude-opus-4-8","permissionMode":"plan","apiKeySource":"none"}
+{"type":"assistant","message":{"model":"claude-opus-4-8","role":"assistant","content":[{"type":"text","text":"CHATOPS_SMOKE_OK"}],"stop_reason":null}}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"five_hour"}}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":1753,"num_turns":1,"result":"CHATOPS_SMOKE_OK","stop_reason":"end_turn","total_cost_usd":0.238}

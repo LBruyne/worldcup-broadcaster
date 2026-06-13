@@ -93,6 +93,22 @@ func TestParseStreamJSON(t *testing.T) {
 	}
 }
 
+// TestParseStreamJSONRealSample feeds output captured from a real `claude -p
+// --output-format stream-json` run (with the noise event types it actually
+// emits: hook_started, system/init, rate_limit_event) to prove the parser
+// ignores them and extracts the terminal result.
+func TestParseStreamJSONRealSample(t *testing.T) {
+	f, err := os.Open(filepath.Join("testdata", "stream-sample.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	res := parseStreamJSON(f)
+	if res.Text != "CHATOPS_SMOKE_OK" || res.IsError || res.NumTurns != 1 || res.Subtype != "success" {
+		t.Errorf("real-sample parse = %+v", res)
+	}
+}
+
 // --- handler dispatch with fakes ---
 
 type fakeRunner struct {

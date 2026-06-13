@@ -64,14 +64,23 @@ func (f *fakeSender) count() int {
 type fakeLLM struct {
 	reply   string
 	err     error
+	mu      sync.Mutex
 	gotSys  string
 	gotUser string
 }
 
 func (f *fakeLLM) Generate(_ context.Context, system, user string) (string, error) {
+	f.mu.Lock()
 	f.gotSys, f.gotUser = system, user
+	f.mu.Unlock()
 	return f.reply, f.err
 }
+
+// userText / sysText / resetUser give the test goroutine synchronized access
+// to fields the async ask worker writes from another goroutine.
+func (f *fakeLLM) userText() string { f.mu.Lock(); defer f.mu.Unlock(); return f.gotUser }
+func (f *fakeLLM) sysText() string  { f.mu.Lock(); defer f.mu.Unlock(); return f.gotSys }
+func (f *fakeLLM) resetUser()       { f.mu.Lock(); f.gotUser = ""; f.mu.Unlock() }
 
 // fakeBackend serves standings/scoreboard/summary fixtures.
 func fakeBackend(t *testing.T) *espn.Client {
@@ -154,13 +163,13 @@ func TestAskUsesContextAndData(t *testing.T) {
 	}
 	// chat context + asker + data must reach the LLM
 	for _, want := range []string{"我觉得C罗才是GOAT", "小红", "梅西和C罗到底谁厉害", "积分榜"} {
-		if !strings.Contains(llm.gotUser, want) {
+		if !strings.Contains(llm.userText(), want) {
 			t.Errorf("llm payload missing %q", want)
 		}
 	}
 	// default persona is the rigorous assistant
-	if !strings.Contains(llm.gotSys, "世界杯小助手") || strings.Contains(llm.gotSys, "罗哥1号迷弟") {
-		t.Errorf("default persona should be assistant:\n%.200s", llm.gotSys)
+	if !strings.Contains(llm.sysText(), "世界杯小助手") || strings.Contains(llm.sysText(), "罗哥1号迷弟") {
+		t.Errorf("default persona should be assistant:\n%.200s", llm.sysText())
 	}
 }
 
@@ -176,14 +185,14 @@ func TestToneModeSwitch(t *testing.T) {
 	}
 	h.OnGroupMessage(ctx, 861376113, 0, "小明", "/ask 你是谁")
 	deadlineWait(t, sender, 2)
-	if !strings.Contains(llm.gotSys, "罗哥1号迷弟") {
-		t.Errorf("spicy persona not active:\n%.200s", llm.gotSys)
+	if !strings.Contains(llm.sysText(), "罗哥1号迷弟") {
+		t.Errorf("spicy persona not active:\n%.200s", llm.sysText())
 	}
 	h.OnGroupMessage(ctx, 861376113, 0, "小明", "/tone 重置")
 	h.OnGroupMessage(ctx, 861376113, 0, "小明", "/ask 你是谁")
 	deadlineWait(t, sender, 4)
-	if !strings.Contains(llm.gotSys, "世界杯小助手") {
-		t.Errorf("reset did not restore assistant:\n%.200s", llm.gotSys)
+	if !strings.Contains(llm.sysText(), "世界杯小助手") {
+		t.Errorf("reset did not restore assistant:\n%.200s", llm.sysText())
 	}
 }
 
@@ -286,10 +295,10 @@ func TestPerGroupIsolation(t *testing.T) {
 	h.OnGroupMessage(ctx, 1093353838, 0, "正式群人", "/ask 群里刚才聊了啥")
 	deadlineWait(t, sender, 1)
 
-	if strings.Contains(llm.gotUser, "XYZZY") {
+	if strings.Contains(llm.userText(), "XYZZY") {
 		t.Error("test-group chat leaked into prod-group /ask context")
 	}
-	if !strings.Contains(llm.gotUser, "正式群只聊球") {
+	if !strings.Contains(llm.userText(), "正式群只聊球") {
 		t.Error("prod-group context missing")
 	}
 	sender.mu.Lock()
@@ -317,10 +326,10 @@ func TestAskCarriesGroupName(t *testing.T) {
 	h, sender := newHandler(t, llm)
 	h.OnGroupMessage(context.Background(), 1093353838, 0, "社员", "/ask 咱们群叫什么")
 	deadlineWait(t, sender, 1)
-	if !strings.Contains(llm.gotUser, "示例群") {
-		t.Errorf("group name missing from payload: %.200s", llm.gotUser)
+	if !strings.Contains(llm.userText(), "示例群") {
+		t.Errorf("group name missing from payload: %.200s", llm.userText())
 	}
-	if !strings.Contains(llm.gotSys, "本群群名") {
+	if !strings.Contains(llm.sysText(), "本群群名") {
 		t.Error("persona prompt missing group-name rule")
 	}
 }
@@ -365,11 +374,11 @@ func TestEngageFollowup(t *testing.T) {
 	if got := sender.last(t); !strings.Contains(got, "急了") {
 		t.Errorf("followup reply = %s", got)
 	}
-	if !strings.Contains(llm.gotUser, "followup") {
-		t.Errorf("mode missing: %.200s", llm.gotUser)
+	if !strings.Contains(llm.userText(), "followup") {
+		t.Errorf("mode missing: %.200s", llm.userText())
 	}
 	// bot's own earlier reply must be visible in context
-	if !strings.Contains(llm.gotUser, BotName) {
+	if !strings.Contains(llm.userText(), BotName) {
 		t.Error("bot's own message absent from context")
 	}
 }
@@ -395,11 +404,11 @@ func TestEngageProactiveProbability(t *testing.T) {
 	h.randFloat = func() float64 { return 0 }
 	h.OnGroupMessage(context.Background(), 861376113, 0, "小明", "姆巴佩世界第一人没悬念了吧")
 	deadlineWait(t, sender, 1)
-	if !strings.Contains(llm.gotUser, "proactive") {
-		t.Errorf("mode missing: %.200s", llm.gotUser)
+	if !strings.Contains(llm.userText(), "proactive") {
+		t.Errorf("mode missing: %.200s", llm.userText())
 	}
 	// the assistant persona (default) must ride along
-	if !strings.Contains(llm.gotSys, "参与纪律") {
+	if !strings.Contains(llm.sysText(), "参与纪律") {
 		t.Error("persona core missing from engage prompt")
 	}
 
@@ -445,13 +454,13 @@ func TestAskCarriesPersonas(t *testing.T) {
 	h.OnGroupMessage(ctx, 861376113, 0, "铁哥", "数据才是硬道理")
 	h.OnGroupMessage(ctx, 861376113, 0, "铁哥", "/ask C罗是不是史上最佳")
 	deadlineWait(t, sender, 2)
-	if !strings.Contains(llm.gotUser, "数据决定一切") {
-		t.Errorf("asker persona missing: %.300s", llm.gotUser)
+	if !strings.Contains(llm.userText(), "数据决定一切") {
+		t.Errorf("asker persona missing: %.300s", llm.userText())
 	}
-	if !strings.Contains(llm.gotSys, "梅西其实更强") {
+	if !strings.Contains(llm.sysText(), "梅西其实更强") {
 		t.Error("hidden messi-supremacy rule missing from persona core")
 	}
-	if !strings.Contains(llm.gotSys, "绝不主动提梅西") {
+	if !strings.Contains(llm.sysText(), "绝不主动提梅西") {
 		t.Error("subtlety rule missing from persona core")
 	}
 }
@@ -599,10 +608,10 @@ func TestToneInjectedIntoAsk(t *testing.T) {
 	h.OnGroupMessage(ctx, 861376113, 0, "小明", "/tone 用文言文说话")
 	h.OnGroupMessage(ctx, 861376113, 0, "小明", "/ask 今晚谁赢")
 	deadlineWait(t, sender, 2)
-	if !strings.Contains(llm.gotUser, "用文言文说话") {
-		t.Errorf("tone missing from ask payload: %.300s", llm.gotUser)
+	if !strings.Contains(llm.userText(), "用文言文说话") {
+		t.Errorf("tone missing from ask payload: %.300s", llm.userText())
 	}
-	if !strings.Contains(llm.gotSys, "入乡随俗") {
+	if !strings.Contains(llm.sysText(), "入乡随俗") {
 		t.Error("style mimicry rule missing from persona core")
 	}
 }
@@ -636,8 +645,8 @@ func TestCalledByNameAlwaysEvaluates(t *testing.T) {
 	h, sender := newHandler(t, llm) // EngageProb=0, no prior bot message
 	h.OnGroupMessage(context.Background(), 861376113, 0, "小明", "机器人 回答一下我刚才的问题")
 	deadlineWait(t, sender, 1)
-	if !strings.Contains(llm.gotUser, "called") {
-		t.Errorf("called mode missing: %.200s", llm.gotUser)
+	if !strings.Contains(llm.userText(), "called") {
+		t.Errorf("called mode missing: %.200s", llm.userText())
 	}
 }
 
@@ -663,14 +672,14 @@ func TestSelfReviewLoop(t *testing.T) {
 		t.Fatalf("reflection = %q", got)
 	}
 	// notes must be injected into the next ask payload
-	llm.gotUser = ""
+	llm.resetUser()
 	h.OnGroupMessage(context.Background(), 861376113, 0, "小明", "/ask 你好")
 	deadline = time.Now().Add(3 * time.Second)
-	for !strings.Contains(llm.gotUser, "你好") && time.Now().Before(deadline) {
+	for !strings.Contains(llm.userText(), "你好") && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if !strings.Contains(llm.gotUser, "回复再短一点") {
-		t.Errorf("reflection missing from ask payload: %.300s", llm.gotUser)
+	if !strings.Contains(llm.userText(), "回复再短一点") {
+		t.Errorf("reflection missing from ask payload: %.300s", llm.userText())
 	}
 }
 
@@ -728,10 +737,10 @@ func TestReplayMissedQA(t *testing.T) {
 	}})
 	h.ReplayMissedQA(context.Background())
 	deadlineWait(t, sender, 1)
-	if !strings.Contains(llm.gotUser, "离线期间的问题") {
-		t.Errorf("missed question not answered: %.200s", llm.gotUser)
+	if !strings.Contains(llm.userText(), "离线期间的问题") {
+		t.Errorf("missed question not answered: %.200s", llm.userText())
 	}
-	if strings.Contains(llm.gotUser, "早就问过了") {
+	if strings.Contains(llm.userText(), "早就问过了") {
 		t.Error("already-answered question must not be replayed")
 	}
 }
