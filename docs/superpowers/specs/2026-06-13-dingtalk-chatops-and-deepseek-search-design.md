@@ -2,7 +2,9 @@
 
 Date: 2026-06-13
 Branch: `feat/dingtalk-chatops-and-deepseek-search`
-Status: building (user authorized direct implementation; design-approval gate waived)
+Status: IMPLEMENTED on this branch — unit/integration tests green (`go test ./...`),
+Plan 1 runner validated against a live `claude` run. E2E gated on credentials (see
+Acceptance Checklist). User authorized direct implementation; design-approval gate waived.
 
 ## Two goals (from the user)
 
