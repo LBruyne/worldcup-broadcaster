@@ -253,20 +253,31 @@ func qqKeepalive(ctx context.Context, cfg *config.Config, bot *onebot.Client, al
 				runCmd("auto-reconnect restart", cfg.OneBot.RestartCmd)
 				continue
 			}
+			// Hard-invalidated session: awaiting a human scan. NapCat stops
+			// regenerating the login QR after it expires a few times unscanned,
+			// so the served QR goes permanently stale ("expired" on every
+			// scan). Restart NapCat on a timer to keep a fresh, scannable QR
+			// alive; the scan page re-syncs within 5s so an open page recovers.
+			if cfg.OneBot.RestartCmd != "" && time.Since(lastRestart) > 12*time.Minute {
+				lastRestart = time.Now()
+				runCmd("qr refresh restart", cfg.OneBot.RestartCmd)
+				continue
+			}
 			if cfg.OneBot.QRSyncCmd != "" {
 				runCmd("qr sync", cfg.OneBot.QRSyncCmd)
 			}
-			// Push the auto-refreshing scan page to DingTalk (at most every
-			// 30 minutes per outage) — the page polls the freshest QR, so
-			// the link never expires.
+			// Push the self-refreshing scan PAGE link to DingTalk (≤1/30min).
+			// Never embed the QR image: DingTalk caches it and NapCat rotates
+			// the QR every minute, so an embedded image is always expired by
+			// scan time. The page always shows the live QR.
 			if ding != nil && cfg.OneBot.QRPublicURL != "" && cfg.OneBot.QRToken != "" &&
 				time.Since(lastQRPush) > 30*time.Minute {
 				lastQRPush = time.Now()
 				page := strings.TrimRight(cfg.OneBot.QRPublicURL, "/") + "/qr/" + cfg.OneBot.QRToken + "/"
 				md := fmt.Sprintf("### ⚠️ 世界杯Bot QQ掉线，需重新扫码\n"+
-					"![qr](%sqrcode.png?t=%d)\n\n"+
-					"[👉 打开自动刷新扫码页（二维码永不过期）](%s)\n\n"+
-					"用 **Bot号** 的手机QQ扫；扫完无需任何操作，Bot自动恢复", page, time.Now().Unix(), page)
+					"**[👉 点此打开扫码页，用Bot号手机QQ扫码](%s)**\n\n"+
+					"⚠️ 必须点上面的链接进页面扫，二维码每分钟自动刷新；不要截图或长按本消息里的图，那种是过期的。\n\n"+
+					"扫完无需任何操作，Bot会自动恢复并回报。", page)
 				go func() {
 					if err := ding.SendMarkdown("Bot掉线需扫码", md); err != nil {
 						logger.Error("dingtalk qr push failed", "error", err)
@@ -277,7 +288,7 @@ func qqKeepalive(ctx context.Context, cfg *config.Config, bot *onebot.Client, al
 			}
 			logger.Warn("napcat alive but qq offline; awaiting manual login", "consecutive", consecutive)
 			alerter.Alert("qq-login", fmt.Sprintf(
-				"QQ登录态失效（连续%d次探测失败），自动重连无效，需要人工扫码：最新二维码已同步到 qrcode-login.png，或打开 NapCat WebUI 扫码", consecutive))
+				"QQ登录态失效（连续%d次探测失败），需要人工扫码：打开扫码页扫码（二维码每分钟自动刷新）", consecutive))
 			continue
 		}
 		alerter.Alert("qq-online", fmt.Sprintf("QQ疑似掉线（连续%d次探测失败，err=%v），尝试自动重启 NapCat", consecutive, err))
