@@ -35,6 +35,38 @@ systemctl restart worldcup-broadcaster
 
 详细步骤见 [deploy/README.md](deploy/README.md)。
 
+## /ask 联网搜索（DeepSeek 原生 web_search）
+
+`/ask` 与 @机器人 默认走手写的 DuckDuckGo 抓取 + 核实管线。也可切换到 **DeepSeek 官方 Anthropic
+端点的原生 `web_search`**（模型自主联网核实，替代抓取）：在 `config.yaml` 把
+
+```yaml
+llm:
+  base_url: "https://api.deepseek.com/anthropic"   # api_format 留空会自动识别为 anthropic
+  model: "deepseek-v4-pro"
+  web_search: true
+```
+
+开启后 `/ask` 跳过 DuckDuckGo 抓取与人工核实步骤，由模型边搜边答；ESPN 的赛程/积分/榜单/逐场
+详情仍作为权威数据内联喂入（DeepSeek 的 Anthropic 端点不支持 MCP，故 RAG 走内联）。
+
+## 钉钉 ChatOps：群里指挥 Claude 改代码
+
+在钉钉群 @机器人 发命令即可驱动 **Claude Code** 修改本仓库并自测，结果回贴群里。需要一个
+**企业内部应用-机器人**并开启 **Stream 模式**（websocket，无需公网），配置见 `dingtalk_bot`：
+
+```yaml
+dingtalk_bot:
+  enabled: true
+  app_key: "..."          # 也可用环境变量 DINGBOT_APP_KEY / DINGBOT_APP_SECRET
+  app_secret: "..."
+  admin_staff_ids: ["你的staffId"]   # 仅这些人能跑改动类命令
+```
+
+群命令：`做 <需求>`（改代码+自测）、`问 <问题>`（只读分析）、`测试`、`状态`、`diff`、`pr`、`帮助`。
+改动全部在**隔离的 git worktree + `chatops/work` 分支**进行，永不直接动 master；`pr` 推分支开 PR
+由人审。详见 [设计文档](docs/superpowers/specs/2026-06-13-dingtalk-chatops-and-deepseek-search-design.md)。
+
 ## 开发
 
 ```bash

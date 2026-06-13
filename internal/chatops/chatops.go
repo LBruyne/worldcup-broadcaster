@@ -178,8 +178,10 @@ func (h *Handler) runJob(ctx context.Context, reply dingbot.Replier, fn func(con
 // ensureWorktree creates the isolated worktree + branch on first use, reusing
 // it on later commands.
 func (h *Handler) ensureWorktree(ctx context.Context) error {
-	if fi, err := os.Stat(filepath.Join(h.worktreeDir, ".git")); err == nil && (fi.IsDir() || !fi.IsDir()) {
-		return nil // worktree already present (.git is a file in linked worktrees)
+	// A linked worktree marks itself with a .git file (not a dir); its mere
+	// presence means the worktree is already set up, so reuse it.
+	if _, err := os.Stat(filepath.Join(h.worktreeDir, ".git")); err == nil {
+		return nil
 	}
 	out, err := h.exec(ctx, h.repoDir, "git", "worktree", "add", "-B", h.branch, h.worktreeDir)
 	if err != nil {
