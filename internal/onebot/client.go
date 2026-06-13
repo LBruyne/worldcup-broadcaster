@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
 	"net/http"
 	"strings"
 	"sync"
@@ -19,6 +20,29 @@ import (
 type groupMsg struct {
 	groupID int64
 	text    string
+}
+
+// PendingMsg is a group send that failed (QQ offline) and is held for replay
+// once the account is back online.
+type PendingMsg struct {
+	GroupID int64     `json:"group_id"`
+	Text    string    `json:"text"`
+	At      time.Time `json:"at"`
+}
+
+// pendingStore is the subset of *store.Store used to persist undelivered
+// messages across restarts.
+type pendingStore interface {
+	LoadJSON(dir, name string, v any) error
+	SaveJSON(dir, name string, v any) error
+}
+
+// HistMsg is one parsed group history entry.
+type HistMsg struct {
+	UserID   int64
+	Nickname string
+	Text     string
+	Time     int64 // unix seconds
 }
 
 type Client struct {
@@ -36,6 +60,12 @@ type Client struct {
 	// 120 (bot muted / restricted): callers can check Muted to back off.
 	mutedMu    sync.Mutex
 	mutedUntil map[int64]time.Time
+
+	// pending holds sends that failed while offline, for replay on recovery.
+	pendMu  sync.Mutex
+	pending []PendingMsg
+	store   pendingStore
+
 	// OnSendError, when set, is invoked for every failed group send so the
 	// alerter can notify the admin.
 	OnSendError func(error)
@@ -72,6 +102,42 @@ func (c *Client) markMuted(groupID int64, d time.Duration) {
 	c.logger.Warn("group send rejected (likely muted), backing off", "group", groupID, "backoff", d)
 }
 
+// SetStore wires persistence for undelivered messages and loads any left
+// over from a previous run.
+func (c *Client) SetStore(s pendingStore) {
+	c.store = s
+	var saved []PendingMsg
+	if s.LoadJSON("state", "pending-sends", &saved) == nil && len(saved) > 0 {
+		c.pendMu.Lock()
+		c.pending = saved
+		c.pendMu.Unlock()
+		c.logger.Info("loaded pending sends", "count", len(saved))
+	}
+}
+
+// paceFor returns a human-like delay after a message: longer texts wait
+// longer (a person takes longer to "type" them), with ±20% jitter, so the
+// send cadence does not look mechanical to QQ risk control. The length
+// component scales with the base interval (≈ +1 interval per 60 runes) so it
+// is meaningful in production yet negligible under tiny test intervals.
+func (c *Client) paceFor(runes int) time.Duration {
+	d := c.interval + time.Duration(int64(c.interval)*int64(runes)/60)
+	if d > 25*time.Second {
+		d = 25 * time.Second
+	}
+	jitter := 1.0 + (rand.Float64()*0.4 - 0.2)
+	return time.Duration(float64(d) * jitter)
+}
+
+func (c *Client) sleep(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-time.After(d):
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 // Start launches the queue consumer; it drains until ctx is cancelled.
 func (c *Client) Start(ctx context.Context) {
 	c.ctx = ctx
@@ -83,14 +149,11 @@ func (c *Client) Start(ctx context.Context) {
 			case msg := <-c.queue:
 				// Very long messages both trip NapCat's 30s send ack and
 				// look like spam to QQ risk control: send them in chunks,
-				// spaced like ordinary messages.
-				for i, part := range splitMessage(msg.text, maxMsgRunes) {
-					if i > 0 {
-						select {
-						case <-time.After(c.interval):
-						case <-ctx.Done():
-							return
-						}
+				// paced by length like a human typing.
+				parts := splitMessage(msg.text, maxMsgRunes)
+				for i, part := range parts {
+					if i > 0 && !c.sleep(ctx, c.paceFor(len([]rune(parts[i-1])))) {
+						return
 					}
 					err := c.sendGroup(msg.groupID, part)
 					if err != nil && strings.Contains(err.Error(), "Timeout: NTEvent") {
@@ -102,25 +165,74 @@ func (c *Client) Start(ctx context.Context) {
 					}
 					if err != nil {
 						if strings.Contains(err.Error(), `"result": 120`) {
+							// muted: dropping is correct (replaying spams on unmute)
 							c.markMuted(msg.groupID, 10*time.Minute)
+						} else {
+							// likely offline / transient: hold the un-sent
+							// remainder for replay once back online.
+							c.holdPending(msg.groupID, strings.Join(parts[i:], "\n"))
 						}
 						c.logger.Error("send group message failed", "error", err)
 						if c.OnSendError != nil {
-							// Off the consumer goroutine: an alert (private msg
-							// over the same HTTP endpoint) must not stall the
-							// group-message queue.
 							go c.OnSendError(err)
 						}
+						break // stop this message; don't hammer a dead endpoint
 					}
 				}
-				select {
-				case <-time.After(c.interval):
-				case <-ctx.Done():
+				if !c.sleep(ctx, c.paceFor(len([]rune(parts[len(parts)-1])))) {
 					return
 				}
 			}
 		}
 	}()
+}
+
+// holdPending records an undelivered message for later replay (capped, with
+// the oldest dropped past the cap).
+func (c *Client) holdPending(groupID int64, text string) {
+	c.pendMu.Lock()
+	c.pending = append(c.pending, PendingMsg{GroupID: groupID, Text: text, At: time.Now()})
+	if len(c.pending) > 200 {
+		c.pending = c.pending[len(c.pending)-200:]
+	}
+	snapshot := append([]PendingMsg(nil), c.pending...)
+	c.pendMu.Unlock()
+	if c.store != nil {
+		_ = c.store.SaveJSON("state", "pending-sends", snapshot)
+	}
+}
+
+// PendingCount reports how many undelivered messages are queued for replay.
+func (c *Client) PendingCount() int {
+	c.pendMu.Lock()
+	defer c.pendMu.Unlock()
+	return len(c.pending)
+}
+
+// FlushPending re-enqueues messages that failed while offline (skipping any
+// older than maxAge as too stale to matter) and clears the buffer. Returns
+// the number re-enqueued.
+func (c *Client) FlushPending(maxAge time.Duration) int {
+	c.pendMu.Lock()
+	pend := c.pending
+	c.pending = nil
+	c.pendMu.Unlock()
+	if c.store != nil {
+		_ = c.store.SaveJSON("state", "pending-sends", []PendingMsg{})
+	}
+	cutoff := time.Now().Add(-maxAge)
+	n := 0
+	for _, m := range pend {
+		if m.At.Before(cutoff) {
+			continue
+		}
+		c.EnqueueGroupTo(m.GroupID, m.Text)
+		n++
+	}
+	if n > 0 {
+		c.logger.Info("replaying pending sends", "count", n, "dropped_stale", len(pend)-n)
+	}
+	return n
 }
 
 // EnqueueGroup queues a broadcast to every configured group; drops (with a
@@ -247,6 +359,72 @@ func (c *Client) GroupMembers(groupID int64) ([]string, error) {
 		}
 	}
 	return names, nil
+}
+
+// GroupHistory returns up to count recent messages of a group (oldest first),
+// used on recovery to find questions asked while the bot was offline.
+func (c *Client) GroupHistory(groupID int64, count int) ([]HistMsg, error) {
+	raw, err := json.Marshal(map[string]any{"group_id": groupID, "count": count})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(http.MethodPost, c.baseURL+"/get_group_msg_history", bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return parseHistory(body)
+}
+
+func parseHistory(body []byte) ([]HistMsg, error) {
+	var r struct {
+		Data struct {
+			Messages []struct {
+				Time   int64 `json:"time"`
+				Sender struct {
+					UserID   int64  `json:"user_id"`
+					Nickname string `json:"nickname"`
+					Card     string `json:"card"`
+				} `json:"sender"`
+				Message []struct {
+					Type string `json:"type"`
+					Data struct {
+						Text string `json:"text"`
+					} `json:"data"`
+				} `json:"message"`
+			} `json:"messages"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &r); err != nil {
+		return nil, fmt.Errorf("history parse: %.200s", body)
+	}
+	out := make([]HistMsg, 0, len(r.Data.Messages))
+	for _, m := range r.Data.Messages {
+		var b strings.Builder
+		for _, seg := range m.Message {
+			if seg.Type == "text" {
+				b.WriteString(seg.Data.Text)
+			}
+		}
+		name := m.Sender.Card
+		if name == "" {
+			name = m.Sender.Nickname
+		}
+		out = append(out, HistMsg{UserID: m.Sender.UserID, Nickname: name, Text: b.String(), Time: m.Time})
+	}
+	return out, nil
 }
 
 // GetStatus reports whether the QQ account behind NapCat is online.

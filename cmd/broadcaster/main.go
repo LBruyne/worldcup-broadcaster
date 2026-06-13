@@ -68,6 +68,7 @@ func main() {
 	espnClient := espn.NewClient(cfg.ESPN.League)
 	bot := onebot.New(cfg.OneBot.BaseURL, cfg.OneBot.AccessToken, cfg.OneBot.GroupIDs,
 		time.Duration(cfg.OneBot.SendIntervalMS)*time.Millisecond, logger)
+	bot.SetStore(st)
 	alerter := alert.New(bot, cfg.OneBot.AdminQQ, logger)
 	if cfg.OneBot.AlertCmd != "" {
 		alerter.SetCommand(cfg.OneBot.AlertCmd)
@@ -142,12 +143,13 @@ func main() {
 		return
 	}
 
+	var qaHandler *qa.Handler
 	if cfg.OneBot.ListenAddr != "" {
 		var qaLLM qa.LLM
 		if llmClient != nil {
 			qaLLM = llmClient
 		}
-		qaHandler := qa.NewHandler(qa.Options{
+		qaHandler = qa.NewHandler(qa.Options{
 			GroupIDs:       cfg.OneBot.GroupIDs,
 			GroupNames:     cfg.QA.GroupNames,
 			AdminQQ:        cfg.OneBot.AdminQQ,
@@ -159,6 +161,7 @@ func main() {
 			SeedPersonas:   cfg.QA.SeedPersonas,
 		}, bot, qaLLM, dig, espnClient, st, logger)
 		qaHandler.SetMemberLister(bot)
+		qaHandler.SetHistoryReader(bot)
 		qaHandler.Start(ctx)
 		go func() {
 			if err := qa.StartServer(ctx, cfg.OneBot.ListenAddr, qaHandler, logger); err != nil {
@@ -168,8 +171,21 @@ func main() {
 		}()
 	}
 
+	// onRecovery runs after the bot regains its QQ session post-kick:
+	// announce + re-list commands, replay sends that failed while offline,
+	// then answer questions asked during the outage.
+	onRecovery := func() {
+		if qaHandler != nil {
+			qaHandler.AnnounceRecovery()
+		}
+		bot.FlushPending(3 * time.Hour)
+		if qaHandler != nil {
+			qaHandler.ReplayMissedQA(ctx)
+		}
+	}
+
 	if cfg.OneBot.KeepaliveIntervalMin > 0 {
-		go qqKeepalive(ctx, cfg, bot, alerter, ding, logger)
+		go qqKeepalive(ctx, cfg, bot, alerter, ding, onRecovery, logger)
 	}
 
 	sched := newMatchScheduler(w, espnClient, alerter, logger)
@@ -199,7 +215,7 @@ func main() {
 // qqKeepalive probes NapCat's online status and self-heals: on failure it
 // alerts the admin (best-effort) and runs the restart command, at most once
 // per 20 minutes.
-func qqKeepalive(ctx context.Context, cfg *config.Config, bot *onebot.Client, alerter *alert.Alerter, ding *dingtalk.Client, logger *slog.Logger) {
+func qqKeepalive(ctx context.Context, cfg *config.Config, bot *onebot.Client, alerter *alert.Alerter, ding *dingtalk.Client, onRecovery func(), logger *slog.Logger) {
 	interval := time.Duration(cfg.OneBot.KeepaliveIntervalMin) * time.Minute
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -228,6 +244,10 @@ func qqKeepalive(ctx context.Context, cfg *config.Config, bot *onebot.Client, al
 				if ding != nil && !lastQRPush.IsZero() {
 					go func() { _ = ding.SendText("✅ 世界杯Bot QQ已恢复在线") }()
 					lastQRPush = time.Time{}
+				}
+				if onRecovery != nil {
+					// NapCat needs a moment after login before sends land.
+					go func() { time.Sleep(8 * time.Second); onRecovery() }()
 				}
 			}
 			consecutive = 0

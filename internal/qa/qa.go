@@ -15,6 +15,7 @@ import (
 	"worldcup-broadcaster/internal/cnmap"
 	"worldcup-broadcaster/internal/digest"
 	"worldcup-broadcaster/internal/espn"
+	"worldcup-broadcaster/internal/onebot"
 	"worldcup-broadcaster/internal/store"
 )
 
@@ -34,6 +35,12 @@ type muteChecker interface {
 // members when the bot joins so every member gets an initial profile stub.
 type MemberLister interface {
 	GroupMembers(groupID int64) ([]string, error)
+}
+
+// HistoryReader is satisfied by *onebot.Client; used on recovery to find
+// questions asked while the bot was offline.
+type HistoryReader interface {
+	GroupHistory(groupID int64, count int) ([]onebot.HistMsg, error)
 }
 
 type LLM interface {
@@ -79,6 +86,7 @@ type Handler struct {
 	opts       Options
 	profiles   *Profiles
 	members    MemberLister   // optional; nil in tests
+	histReader HistoryReader  // optional; nil in tests
 	randFloat  func() float64 // injectable for tests
 
 	mu         sync.Mutex
@@ -166,6 +174,84 @@ func (h *Handler) groupName(groupID int64) string {
 
 // SetMemberLister wires the OneBot member-list API (optional).
 func (h *Handler) SetMemberLister(m MemberLister) { h.members = m }
+
+// SetHistoryReader wires the OneBot group-history API (optional).
+func (h *Handler) SetHistoryReader(r HistoryReader) { h.histReader = r }
+
+// AnnounceRecovery posts a "back online" notice plus the command list to
+// every group after the bot recovers from a forced QQ logout.
+func (h *Handler) AnnounceRecovery() {
+	for gid := range h.groups {
+		h.reply(gid, "🟢 刚刚被QQ强制下线了一会儿，现在已经恢复正常啦！下面把能用的命令再贴一遍 👇\n\n"+helpText)
+	}
+}
+
+// ReplayMissedQA scans each group's recent history for /ask or @-bot
+// questions that arrived after the bot's last message (i.e. while it was
+// offline) and answers them in order. Bounded by recency and count so it
+// never floods the group.
+func (h *Handler) ReplayMissedQA(ctx context.Context) {
+	if h.histReader == nil {
+		return
+	}
+	cutoff := time.Now().Add(-2 * time.Hour).Unix()
+	for gid := range h.groups {
+		msgs, err := h.histReader.GroupHistory(gid, 30)
+		if err != nil {
+			h.logger.Error("recovery history fetch failed", "group", gid, "error", err)
+			continue
+		}
+		// find the bot's own last message; only questions after it are unanswered
+		lastBot := int64(0)
+		for _, m := range msgs {
+			if m.Nickname == BotName && m.Time > lastBot {
+				lastBot = m.Time
+			}
+		}
+		var missed []onebot.HistMsg
+		for _, m := range msgs {
+			if m.Time <= lastBot || m.Time < cutoff || m.Nickname == BotName {
+				continue
+			}
+			if isQuestion(m.Text) {
+				missed = append(missed, m)
+			}
+		}
+		if len(missed) > 3 {
+			missed = missed[len(missed)-3:] // answer at most the 3 most recent
+		}
+		for _, m := range missed {
+			q := stripQuestionPrefix(m.Text)
+			h.logger.Info("answering missed question", "group", gid, "from", m.Nickname, "q", q)
+			select {
+			case h.askQueue <- askTask{groupID: gid, nickname: m.Nickname, question: q}:
+			default:
+			}
+		}
+	}
+}
+
+// isQuestion reports whether a history message was directed at the bot (an
+// /ask command or an @-mention by name).
+func isQuestion(text string) bool {
+	t := strings.TrimSpace(text)
+	for _, p := range []string{"/ask", "/问", "/提问"} {
+		if strings.HasPrefix(t, p) {
+			return true
+		}
+	}
+	return addressesBot(t)
+}
+
+func stripQuestionPrefix(text string) string {
+	t := strings.TrimSpace(text)
+	for _, p := range []string{"/ask", "/问", "/提问"} {
+		if strings.HasPrefix(t, p) {
+			return strings.TrimSpace(strings.TrimPrefix(t, p))
+		}
+	}
+	return t
+}
 
 // OnSelfJoin fires when the bot account itself enters a configured group:
 // it introduces itself, stubs a profile for every member, and asks the

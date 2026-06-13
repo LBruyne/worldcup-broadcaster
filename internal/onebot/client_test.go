@@ -6,8 +6,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"strings"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -182,5 +182,78 @@ func TestSplitMessage(t *testing.T) {
 	hard := splitMessage(strings.Repeat("a", 250), 100)
 	if len(hard) != 3 {
 		t.Errorf("hard split = %d", len(hard))
+	}
+}
+
+func TestPaceForScales(t *testing.T) {
+	c := &Client{interval: 3 * time.Second}
+	short := c.paceFor(10)
+	long := c.paceFor(600)
+	if short < 2*time.Second || short > 5*time.Second {
+		t.Errorf("short pace out of range: %v", short)
+	}
+	if long <= short {
+		t.Errorf("long (%v) must exceed short (%v)", long, short)
+	}
+	if long > 25*time.Second {
+		t.Errorf("pace not capped: %v", long)
+	}
+	// tiny interval (test mode) stays tiny even for long text
+	ct := &Client{interval: 10 * time.Millisecond}
+	if d := ct.paceFor(600); d > 200*time.Millisecond {
+		t.Errorf("tiny-interval pace too large: %v", d)
+	}
+}
+
+func TestPendingHoldAndFlush(t *testing.T) {
+	c := New("http://x", "", []int64{1}, time.Millisecond, slog.Default())
+	c.holdPending(111, "msg-a")
+	c.holdPending(111, "msg-b")
+	if c.PendingCount() != 2 {
+		t.Fatalf("pending = %d", c.PendingCount())
+	}
+	// drain via the queue so FlushPending re-enqueues without a live server
+	c.queue = make(chan groupMsg, 10)
+	n := c.FlushPending(time.Hour)
+	if n != 2 {
+		t.Errorf("flushed = %d, want 2", n)
+	}
+	if c.PendingCount() != 0 {
+		t.Errorf("pending not cleared: %d", c.PendingCount())
+	}
+	got := <-c.queue
+	if got.text != "msg-a" {
+		t.Errorf("order broken: %q", got.text)
+	}
+}
+
+func TestFlushPendingDropsStale(t *testing.T) {
+	c := New("http://x", "", []int64{1}, time.Millisecond, slog.Default())
+	c.pending = []PendingMsg{
+		{GroupID: 1, Text: "old", At: time.Now().Add(-5 * time.Hour)},
+		{GroupID: 1, Text: "fresh", At: time.Now()},
+	}
+	c.queue = make(chan groupMsg, 10)
+	if n := c.FlushPending(3 * time.Hour); n != 1 {
+		t.Errorf("flushed = %d, want 1 (stale dropped)", n)
+	}
+}
+
+func TestParseHistory(t *testing.T) {
+	body := []byte(`{"data":{"messages":[
+		{"time":100,"sender":{"user_id":5,"nickname":"小明"},"message":[{"type":"text","data":{"text":"/ask 谁会赢"}}]},
+		{"time":200,"sender":{"user_id":6,"nickname":"小红","card":"红姐"},"message":[{"type":"at","data":{"qq":"9"}},{"type":"text","data":{"text":" 在吗"}}]}]}}`)
+	msgs, err := parseHistory(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("msgs = %d", len(msgs))
+	}
+	if msgs[0].Nickname != "小明" || msgs[0].Text != "/ask 谁会赢" || msgs[0].Time != 100 {
+		t.Errorf("msg0 = %+v", msgs[0])
+	}
+	if msgs[1].Nickname != "红姐" { // card preferred
+		t.Errorf("card not preferred: %+v", msgs[1])
 	}
 }

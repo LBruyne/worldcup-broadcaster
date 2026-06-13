@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"worldcup-broadcaster/internal/onebot"
 
 	"worldcup-broadcaster/internal/digest"
 	"worldcup-broadcaster/internal/espn"
@@ -691,5 +692,46 @@ func TestReplyGapPacing(t *testing.T) {
 	}
 	if got := sender.last(t); got != "第二条" {
 		t.Errorf("order broken: %s", got)
+	}
+}
+
+// fakeHistory implements HistoryReader for recovery tests.
+type fakeHistory struct{ msgs map[int64][]onebot.HistMsg }
+
+func (f *fakeHistory) GroupHistory(groupID int64, count int) ([]onebot.HistMsg, error) {
+	return f.msgs[groupID], nil
+}
+
+func TestAnnounceRecovery(t *testing.T) {
+	h, sender := newHandler(t, &fakeLLM{reply: "x"})
+	h.AnnounceRecovery()
+	deadlineWait(t, sender, 1)
+	got := sender.last(t)
+	if !strings.Contains(got, "强制下线") || !strings.Contains(got, "/ask") {
+		t.Errorf("recovery announce missing notice or help: %s", got)
+	}
+}
+
+// Only questions after the bot's last message (asked while offline) get
+// replayed; older ones and the bot's own lines are skipped.
+func TestReplayMissedQA(t *testing.T) {
+	llm := &fakeLLM{reply: "补答完毕"}
+	h, sender := newHandler(t, llm)
+	now := time.Now().Unix()
+	h.SetHistoryReader(&fakeHistory{msgs: map[int64][]onebot.HistMsg{
+		861376113: {
+			{Nickname: "小明", Text: "/ask 早就问过了", Time: now - 100},
+			{Nickname: BotName, Text: "早答过了", Time: now - 90},
+			{Nickname: "小红", Text: "/ask 离线期间的问题", Time: now - 30},
+			{Nickname: "小刚", Text: "随便聊聊天", Time: now - 20}, // not a question
+		},
+	}})
+	h.ReplayMissedQA(context.Background())
+	deadlineWait(t, sender, 1)
+	if !strings.Contains(llm.gotUser, "离线期间的问题") {
+		t.Errorf("missed question not answered: %.200s", llm.gotUser)
+	}
+	if strings.Contains(llm.gotUser, "早就问过了") {
+		t.Error("already-answered question must not be replayed")
 	}
 }
