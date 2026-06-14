@@ -277,16 +277,61 @@ func TestGoalDeferredForEnrichment(t *testing.T) {
 	w := New(nil, sender, store.New(t.TempDir()), func(string, string) {}, slog.Default(),
 		Options{Events: allEvents()})
 
-	w.processSnapshot("m1", "2026-06-12", &s1, bare, slog.Default())
+	w.processSnapshot("m1", "2026-06-12", false, &s1, bare, slog.Default())
 	if got := sender.all(); len(got) != 0 {
 		t.Fatalf("bare goal must be deferred, got %q", got)
 	}
-	w.processSnapshot("m1", "2026-06-12", &s2, enriched, slog.Default())
+	w.processSnapshot("m1", "2026-06-12", false, &s2, enriched, slog.Default())
 	got := sender.all()
 	if len(got) != 1 {
 		t.Fatalf("enriched goal not broadcast: %d msgs", len(got))
 	}
 	if !strings.Contains(got[0], "1 : 1") || !strings.Contains(got[0], "Lee Kang-In") {
 		t.Errorf("msg = %s", got[0])
+	}
+}
+
+func TestIsKnockoutStage(t *testing.T) {
+	if isKnockoutStage("group-stage") {
+		t.Error("group-stage must not be knockout")
+	}
+	// knockout slugs — and an unknown/empty slug defaults to knockout so a real
+	// shootout is never wrongly suppressed
+	for _, s := range []string{"round-of-32", "round-of-16", "quarterfinals", "semifinals", "third-place-playoff", "final", ""} {
+		if !isKnockoutStage(s) {
+			t.Errorf("%q should count as knockout", s)
+		}
+	}
+}
+
+// A group-stage draw must never be announced as going to extra time, even when
+// the feed emits an end-of-regulation key event; the same event in a knockout
+// match must be announced.
+func TestGroupStageSuppressesExtraTime(t *testing.T) {
+	raw := []byte(`{
+	  "header":{"competitions":[{"status":{"type":{"state":"in","detail":"90'"}},
+	    "competitors":[
+	      {"homeAway":"home","score":"1","team":{"displayName":"Mexico"}},
+	      {"homeAway":"away","score":"1","team":{"displayName":"Poland"}}]}]},
+	  "keyEvents":[{"id":"ert1","type":{"id":"83","text":"End Regular Time"},
+	    "clock":{"displayValue":"90'"},"team":{"displayName":"Mexico"}}]}`)
+	var sum espn.Summary
+	if err := json.Unmarshal(raw, &sum); err != nil {
+		t.Fatal(err)
+	}
+
+	gs := &fakeSender{}
+	wg := New(nil, gs, store.New(t.TempDir()), func(string, string) {}, slog.Default(), Options{Events: allEvents()})
+	wg.processSnapshot("g1", "2026-06-13", false, &sum, raw, slog.Default())
+	if got := gs.all(); len(got) != 0 {
+		t.Fatalf("group stage must not announce extra time, got: %q", got)
+	}
+
+	ks := &fakeSender{}
+	wk := New(nil, ks, store.New(t.TempDir()), func(string, string) {}, slog.Default(), Options{Events: allEvents()})
+	wk.processSnapshot("k1", "2026-06-13", true, &sum, raw, slog.Default())
+	got := ks.all()
+	if len(got) != 1 || !strings.Contains(got[0], "加时") {
+		t.Fatalf("knockout must announce extra time, got: %q", got)
 	}
 }

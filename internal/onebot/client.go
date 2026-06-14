@@ -115,18 +115,36 @@ func (c *Client) SetStore(s pendingStore) {
 	}
 }
 
-// paceFor returns a human-like delay after a message: longer texts wait
-// longer (a person takes longer to "type" them), with ±20% jitter, so the
-// send cadence does not look mechanical to QQ risk control. The length
-// component scales with the base interval (≈ +1 interval per 60 runes) so it
-// is meaningful in production yet negligible under tiny test intervals.
-func (c *Client) paceFor(runes int) time.Duration {
-	d := c.interval + time.Duration(int64(c.interval)*int64(runes)/60)
-	if d > 25*time.Second {
-		d = 25 * time.Second
+// pace cap and tuning constants. The base comes from send_interval_ms; the
+// length and burst components scale off it so one config knob tunes everything.
+const (
+	paceCap     = 30 * time.Second // a busy match must never stall indefinitely
+	paceRunesPer = 40              // +1 base interval of "typing time" per N runes
+	paceBurstMax = 3               // burst penalty saturates after this many back-to-back sends
+)
+
+// paceBase is the deterministic delay after a message (no jitter): a base
+// interval, plus "typing time" scaling with length, plus an escalating penalty
+// for back-to-back sends (a flurry of goals/cards/subs sent without the queue
+// draining). Capped so a busy match can't stall forever.
+func (c *Client) paceBase(runes, burst int) time.Duration {
+	d := c.interval + time.Duration(int64(c.interval)*int64(runes)/paceRunesPer)
+	if burst > paceBurstMax {
+		burst = paceBurstMax
 	}
-	jitter := 1.0 + (rand.Float64()*0.4 - 0.2)
-	return time.Duration(float64(d) * jitter)
+	d += time.Duration(burst) * c.interval
+	if d > paceCap {
+		d = paceCap
+	}
+	return d
+}
+
+// paceFor adds ±25% jitter to paceBase so the cadence never looks mechanical to
+// QQ risk control. burst is how many messages have been sent back-to-back
+// without the queue draining (consecutive live events).
+func (c *Client) paceFor(runes, burst int) time.Duration {
+	jitter := 1.0 + (rand.Float64()*0.5 - 0.25)
+	return time.Duration(float64(c.paceBase(runes, burst)) * jitter)
 }
 
 func (c *Client) sleep(ctx context.Context, d time.Duration) bool {
@@ -142,6 +160,7 @@ func (c *Client) sleep(ctx context.Context, d time.Duration) bool {
 func (c *Client) Start(ctx context.Context) {
 	c.ctx = ctx
 	go func() {
+		burst := 0 // consecutive back-to-back sends; widens the gap during flurries
 		for {
 			select {
 			case <-ctx.Done():
@@ -152,7 +171,7 @@ func (c *Client) Start(ctx context.Context) {
 				// paced by length like a human typing.
 				parts := splitMessage(msg.text, maxMsgRunes)
 				for i, part := range parts {
-					if i > 0 && !c.sleep(ctx, c.paceFor(len([]rune(parts[i-1])))) {
+					if i > 0 && !c.sleep(ctx, c.paceFor(len([]rune(parts[i-1])), burst)) {
 						return
 					}
 					err := c.sendGroup(msg.groupID, part)
@@ -179,7 +198,15 @@ func (c *Client) Start(ctx context.Context) {
 						break // stop this message; don't hammer a dead endpoint
 					}
 				}
-				if !c.sleep(ctx, c.paceFor(len([]rune(parts[len(parts)-1])))) {
+				// A queue still holding messages means we're in a live flurry
+				// (consecutive events): escalate the next gap. A drained queue
+				// resets to calm pacing.
+				if len(c.queue) > 0 {
+					burst++
+				} else {
+					burst = 0
+				}
+				if !c.sleep(ctx, c.paceFor(len([]rune(parts[len(parts)-1])), burst)) {
 					return
 				}
 			}
@@ -469,8 +496,10 @@ func (c *Client) GetStatus() (online bool, err error) {
 func (c *Client) WaitIdle(ctx context.Context) {
 	for {
 		if len(c.queue) == 0 {
+			// Wait out a full pace window so a one-shot run doesn't exit while
+			// the consumer is still pacing the final (possibly multi-part) send.
 			select {
-			case <-time.After(c.interval + time.Second):
+			case <-time.After(paceCap + time.Second):
 			case <-ctx.Done():
 			}
 			if len(c.queue) == 0 {

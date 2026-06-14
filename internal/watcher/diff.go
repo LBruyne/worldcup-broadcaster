@@ -114,6 +114,18 @@ func teamNamesMatch(a, b string) bool {
 	return false
 }
 
+// isExtraTimeEvent reports whether an event belongs to the extra-time /
+// shootout family. These only happen in knockout matches — a group-stage draw
+// ends at 90 minutes, so they must never be broadcast for group games.
+func isExtraTimeEvent(t EventType) bool {
+	switch t {
+	case EvEndRegularTime, EvStartExtraTime, EvHalftimeExtraTime,
+		EvStartSecondHalfExtraTime, EvEndExtraTime, EvStartShootout, EvShootoutRound:
+		return true
+	}
+	return false
+}
+
 func classify(k *espn.KeyEvent) EventType {
 	switch k.Type.ID {
 	case typeKickoff:

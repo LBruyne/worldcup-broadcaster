@@ -85,6 +85,9 @@ func (w *Watcher) Watch(ctx context.Context, ev espn.Event) error {
 
 	log.Info("live polling started")
 	date := espn.ChinaDate(ko)
+	// Group-stage matches never go to extra time or penalties; suppress that
+	// event family so a 90' draw isn't announced as "进入加时赛".
+	knockout := isKnockoutStage(ev.Season.Slug)
 	consecutiveFails := 0
 	ticker := time.NewTicker(w.opts.PollInterval)
 	defer ticker.Stop()
@@ -99,7 +102,7 @@ func (w *Watcher) Watch(ctx context.Context, ev espn.Event) error {
 			}
 		} else {
 			consecutiveFails = 0
-			finished := w.processSnapshot(ev.ID, date, sum, raw, log)
+			finished := w.processSnapshot(ev.ID, date, knockout, sum, raw, log)
 			if finished {
 				log.Info("match finished, watcher exiting")
 				return nil
@@ -120,7 +123,7 @@ func (w *Watcher) Watch(ctx context.Context, ev espn.Event) error {
 
 // processSnapshot diffs, renders, enqueues and persists. Returns true when
 // the match reached a terminal state and the final whistle was broadcast.
-func (w *Watcher) processSnapshot(matchID, date string, sum *espn.Summary, raw []byte, log *slog.Logger) bool {
+func (w *Watcher) processSnapshot(matchID, date string, knockout bool, sum *espn.Summary, raw []byte, log *slog.Logger) bool {
 	// Starting lineups go out once, when the match goes live (kickoff
 	// switch governs them, like the kickoff message itself).
 	if liveSt, _, _ := sum.Live(); liveSt.Type.State == "in" &&
@@ -147,6 +150,15 @@ func (w *Watcher) processSnapshot(matchID, date string, sum *espn.Summary, raw [
 	st0, _, _ := sum.Live()
 	events := Diff(sum, func(key string) bool { return w.store.IsPushed(matchID, key) })
 	for _, e := range events {
+		// Group stage has no extra time / shootout: drop any stray ET-family
+		// event the feed emits, marking it seen so it can't backfill later.
+		if !knockout && isExtraTimeEvent(e.Type) {
+			if err := w.store.MarkPushed(matchID, e.Key); err != nil {
+				log.Error("persist pushed state failed", "error", err)
+			}
+			log.Info("suppressed extra-time event in group stage", "type", e.Type, "key", e.Key)
+			continue
+		}
 		// A live goal without its score sentence is still being enriched
 		// by the feed: hold it one poll so the broadcast carries the right
 		// scoreline (and the assist), not a lagging snapshot.
@@ -213,6 +225,14 @@ func (w *Watcher) processSnapshot(matchID, date string, sum *espn.Summary, raw [
 		}
 	}
 	return true
+}
+
+// isKnockoutStage reports whether a competition stage has extra time + a
+// penalty shootout. Only the group stage ("group-stage") lacks them; an
+// unknown/empty slug is treated as knockout so a real shootout is never
+// wrongly suppressed (group games are reliably labelled "group-stage").
+func isKnockoutStage(slug string) bool {
+	return slug != "group-stage"
 }
 
 // Enabled maps an event type to its config switch.

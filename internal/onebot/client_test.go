@@ -185,23 +185,38 @@ func TestSplitMessage(t *testing.T) {
 	}
 }
 
-func TestPaceForScales(t *testing.T) {
+func TestPaceBaseScales(t *testing.T) {
 	c := &Client{interval: 3 * time.Second}
-	short := c.paceFor(10)
-	long := c.paceFor(600)
-	if short < 2*time.Second || short > 5*time.Second {
-		t.Errorf("short pace out of range: %v", short)
+	// longer messages wait longer ("typing" time)
+	if c.paceBase(600, 0) <= c.paceBase(10, 0) {
+		t.Error("longer message must wait longer")
 	}
-	if long <= short {
-		t.Errorf("long (%v) must exceed short (%v)", long, short)
+	// back-to-back sends (burst) widen the gap
+	if c.paceBase(10, 2) <= c.paceBase(10, 0) {
+		t.Error("burst must widen the gap")
 	}
-	if long > 25*time.Second {
-		t.Errorf("pace not capped: %v", long)
+	// burst penalty saturates so a busy match can't escalate without bound
+	if c.paceBase(10, paceBurstMax) != c.paceBase(10, paceBurstMax+5) {
+		t.Error("burst penalty must saturate at paceBurstMax")
 	}
-	// tiny interval (test mode) stays tiny even for long text
-	ct := &Client{interval: 10 * time.Millisecond}
-	if d := ct.paceFor(600); d > 200*time.Millisecond {
-		t.Errorf("tiny-interval pace too large: %v", d)
+	// capped, and never below the base interval
+	if c.paceBase(100000, 9) != paceCap {
+		t.Errorf("pace not capped at %v: %v", paceCap, c.paceBase(100000, 9))
+	}
+	if c.paceBase(0, 0) < c.interval {
+		t.Errorf("pace below base interval: %v", c.paceBase(0, 0))
+	}
+}
+
+func TestPaceForJitter(t *testing.T) {
+	c := &Client{interval: 4 * time.Second}
+	base := c.paceBase(40, 1)
+	lo := time.Duration(float64(base) * 0.70)
+	hi := time.Duration(float64(base) * 1.30)
+	for i := 0; i < 100; i++ {
+		if d := c.paceFor(40, 1); d < lo || d > hi {
+			t.Fatalf("jitter out of band: base=%v got=%v", base, d)
+		}
 	}
 }
 
