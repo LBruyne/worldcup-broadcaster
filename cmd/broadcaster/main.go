@@ -359,6 +359,9 @@ func startQRServer(ctx context.Context, cfg *config.Config, logger *slog.Logger)
 	}
 	var syncMu sync.Mutex
 	var lastSync time.Time
+	var urlMu sync.Mutex
+	var cachedURL string
+	var lastURLAt time.Time
 	prefix := "/qr/" + ob.QRToken
 	mux := http.NewServeMux()
 	mux.HandleFunc(prefix+"/", func(w http.ResponseWriter, r *http.Request) {
@@ -366,6 +369,8 @@ func startQRServer(ctx context.Context, cfg *config.Config, logger *slog.Logger)
 		fmt.Fprint(w, `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Bot 扫码登录</title>
 <body style="text-align:center;font-family:-apple-system,sans-serif;padding:20px 16px;max-width:430px;margin:0 auto">
 <h3>用 Bot 号手机QQ登录</h3>
+<a id="open" href="#" style="display:none;padding:13px 22px;margin:4px 0;font-size:16px;font-weight:bold;background:#12b7f5;color:#fff;border-radius:8px;text-decoration:none">👉 点此用本机QQ一键登录</a>
+<div id="openhint" style="display:none;color:#999;font-size:13px;margin:4px 0 10px">能唤起手机QQ就最省事；唤不起就用下面的扫码法 👇</div>
 <img id="q" src="qrcode.png" style="width:78%;max-width:300px;border:1px solid #ddd;border-radius:8px">
 <div style="margin:12px 0">
 <button id="t" onclick="tg()" style="padding:9px 18px;font-size:15px;border:0;background:#07c160;color:#fff;border-radius:6px">⏸ 暂停刷新好保存</button>
@@ -384,7 +389,35 @@ function rf(){document.getElementById('q').src='qrcode.png?t='+Date.now()}
 function tg(){on=!on;var b=document.getElementById('t');
  if(on){t=setInterval(rf,5000);rf();b.textContent='⏸ 暂停刷新好保存'}
  else{clearInterval(t);b.textContent='▶ 继续刷新'}}
+function lu(){fetch('loginurl?t='+Date.now()).then(function(r){return r.text()}).then(function(u){
+ u=(u||'').trim();var a=document.getElementById('open'),h=document.getElementById('openhint');
+ if(u.indexOf('http')===0){a.href=u;a.style.display='inline-block';h.style.display='block'}
+ else{a.style.display='none';h.style.display='none'}}).catch(function(){})}
+lu();setInterval(lu,8000);
 </script>`)
+	})
+	// loginurl returns the QR's decoded login URL (NapCat logs it) so the page
+	// can offer a one-tap "open in 手机QQ" link. Cached ≤3s to avoid hammering
+	// the log-scrape command when several pages poll it.
+	mux.HandleFunc(prefix+"/loginurl", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		if ob.QRURLCmd == "" {
+			return
+		}
+		urlMu.Lock()
+		defer urlMu.Unlock()
+		if time.Since(lastURLAt) > 3*time.Second {
+			lastURLAt = time.Now()
+			out, err := exec.CommandContext(ctx, "sh", "-c", ob.QRURLCmd).CombinedOutput()
+			if err != nil {
+				logger.Debug("qr url cmd failed", "error", err, "output", string(out))
+				cachedURL = ""
+			} else {
+				cachedURL = strings.TrimSpace(string(out))
+			}
+		}
+		fmt.Fprint(w, cachedURL)
 	})
 	mux.HandleFunc(prefix+"/qrcode.png", func(w http.ResponseWriter, r *http.Request) {
 		if ob.QRSyncCmd != "" {
