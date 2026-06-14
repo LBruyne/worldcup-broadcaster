@@ -76,6 +76,11 @@ type QA struct {
 	// replies in one group (QA answers, interjections). Replies queue and
 	// drain at this pace; 0 disables pacing. Broadcasts are unaffected.
 	ReplyGapSec int `yaml:"reply_gap_sec"`
+	// PolymarketFile is the JSON of live Polymarket World Cup odds (championship
+	// / advance / golden-boot / group-winner implied probabilities), written by
+	// an external fetcher. Attached to odds/probability questions so the bot
+	// quotes real market odds instead of fabricating. Empty disables.
+	PolymarketFile string `yaml:"polymarket_file"`
 }
 
 type ESPN struct {

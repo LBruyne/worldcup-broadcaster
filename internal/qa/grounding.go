@@ -181,6 +181,13 @@ func (h *Handler) grounding(ctx context.Context, question string) (string, bool)
 	r := h.route(ctx, question)
 	data := map[string]any{}
 	playerStats := map[string]any{} // structured ESPN data also fed to the verifier
+	// Odds/probability questions get live Polymarket market odds (when synced),
+	// so the bot quotes real implied probabilities instead of making one up.
+	if oddsQuestionRe.MatchString(question) {
+		if pm := h.polymarketOdds(); pm != "" {
+			data["Polymarket实时盘口(各队夺冠/出线/金靴/小组头名的市场隐含概率)"] = json.RawMessage(pm)
+		}
+	}
 	for _, need := range r.Needs {
 		switch {
 		case need == "schedule":

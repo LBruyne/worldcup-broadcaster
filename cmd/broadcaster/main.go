@@ -174,6 +174,7 @@ func main() {
 			FollowupWindow: time.Duration(cfg.QA.FollowupWindowSec) * time.Second,
 			ReplyGap:       time.Duration(cfg.QA.ReplyGapSec) * time.Second,
 			SeedPersonas:   cfg.QA.SeedPersonas,
+			PolymarketFile: cfg.QA.PolymarketFile,
 		}, bot, qaLLM, dig, espnClient, st, logger)
 		qaHandler.SetMemberLister(bot)
 		qaHandler.SetHistoryReader(bot)

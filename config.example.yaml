@@ -26,6 +26,7 @@ qa:
   engage_cooldown_min: 4               # 两次主动插话最小间隔（分钟）
   followup_window_sec: 180             # Bot发言后判定追问的时间窗（秒）
   reply_gap_sec: 15                    # 同一群内两条对话回复的最小间隔（秒），回复排队按节奏发出
+  polymarket_file: ""                   # Polymarket实时赔率JSON路径(外部fetcher同步;留空禁用),如 /opt/worldcup/data/polymarket/wc.json
   group_names:
     # 123456789: "群昵称"   # /ask 人设里对该群的称呼
   seed_personas: {}               # 初始成员人设示例： "昵称": "球队立场/背景描述"（管理员可在群里用 /人设 增改）
