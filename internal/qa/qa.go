@@ -70,6 +70,25 @@ func (h *Handler) nativeSearch() bool {
 	return false
 }
 
+// SearchLLM is implemented by an LLM that attaches web search to a single call.
+// Only the user-facing /ask + engage answers use it; routing, name translation
+// and digests deliberately omit search so their output stays clean.
+type SearchLLM interface {
+	GenerateSearch(ctx context.Context, system, user string, think bool) (string, error)
+}
+
+// answer runs the final user-facing generation: web search when supported,
+// else plain thinking generation, else a bare call.
+func (h *Handler) answer(ctx context.Context, system, user string, think bool) (string, error) {
+	if sl, ok := h.llm.(SearchLLM); ok {
+		return sl.GenerateSearch(ctx, system, user, think)
+	}
+	if tl, ok := h.llm.(ThinkingLLM); ok {
+		return tl.GenerateThink(ctx, system, user, think)
+	}
+	return h.llm.Generate(ctx, system, user)
+}
+
 type ChatMsg struct {
 	Nickname string `json:"nickname"`
 	Text     string `json:"text"`
@@ -566,12 +585,7 @@ func (h *Handler) handleAsk(ctx context.Context, groupID int64, nickname, questi
 	}
 	cctx, cancel := context.WithTimeout(ctx, 150*time.Second)
 	defer cancel()
-	var out string
-	if tl, ok := h.llm.(ThinkingLLM); ok {
-		out, err = tl.GenerateThink(cctx, h.askPrompt(groupID), string(payload), hard)
-	} else {
-		out, err = h.llm.Generate(cctx, h.askPrompt(groupID), string(payload))
-	}
+	out, err := h.answer(cctx, h.askPrompt(groupID), string(payload), hard)
 	if err != nil {
 		h.logger.Error("ask llm failed", "error", err)
 		h.reply(groupID, "🤖 暴龙机过载冒烟了，稍后再问（LLM调用失败）")

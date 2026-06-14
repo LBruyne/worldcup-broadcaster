@@ -39,9 +39,9 @@ func TestAnthropicGenerateWithSearch(t *testing.T) {
 	if !c.NativeSearch() {
 		t.Error("NativeSearch should be true when web search enabled")
 	}
-	got, err := c.GenerateThink(context.Background(), "你是足球助手", "梅西进了多少球", true)
+	got, err := c.GenerateSearch(context.Background(), "你是足球助手", "梅西进了多少球", true)
 	if err != nil {
-		t.Fatalf("GenerateThink: %v", err)
+		t.Fatalf("GenerateSearch: %v", err)
 	}
 	if got != "梅西本赛季打进 25 球 ⚽" {
 		t.Errorf("content = %q", got)
@@ -62,6 +62,27 @@ func TestAnthropicGenerateWithSearch(t *testing.T) {
 	// system prompt + single user message
 	if gotBody["system"] != "你是足球助手" {
 		t.Errorf("system = %v", gotBody["system"])
+	}
+}
+
+// Even on a web-search-enabled client, GenerateThink (utility calls: routing,
+// name translation, digests) must NOT attach the web_search tool, or the model
+// emits tool-call markup that breaks JSON parsing.
+func TestAnthropicGenerateThinkOmitsSearch(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		json.Unmarshal(raw, &gotBody)
+		w.Write([]byte(`{"content":[{"type":"text","text":"{}"}]}`))
+	}))
+	defer srv.Close()
+
+	c := NewAnthropic(srv.URL, "sk-test", "deepseek-v4-pro", 5*time.Second, true) // search ENABLED
+	if _, err := c.GenerateThink(context.Background(), "translate", "name", true); err != nil {
+		t.Fatalf("GenerateThink: %v", err)
+	}
+	if _, ok := gotBody["tools"]; ok {
+		t.Error("GenerateThink must not attach web_search even on a search-enabled client")
 	}
 }
 

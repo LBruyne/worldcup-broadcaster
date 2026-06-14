@@ -99,12 +99,7 @@ func (h *Handler) maybeEngage(ctx context.Context, groupID int64, nickname, text
 	}
 	cctx, cancel := context.WithTimeout(ctx, 150*time.Second)
 	defer cancel()
-	var out string
-	if tl, ok := h.llm.(ThinkingLLM); ok {
-		out, err = tl.GenerateThink(cctx, h.engagePrompt(groupID), string(payload), think)
-	} else {
-		out, err = h.llm.Generate(cctx, h.engagePrompt(groupID), string(payload))
-	}
+	out, err := h.answer(cctx, h.engagePrompt(groupID), string(payload), think)
 	if err != nil {
 		h.logger.Error("engage llm failed", "error", err)
 		return

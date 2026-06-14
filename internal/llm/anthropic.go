@@ -87,14 +87,27 @@ type anthropicResponse struct {
 	} `json:"error"`
 }
 
-// Generate runs one message with thinking enabled (quality-sensitive default).
+// Generate runs one message with thinking enabled, no web search — for digest
+// commentary and other utility text generation.
 func (c *AnthropicClient) Generate(ctx context.Context, system, user string) (string, error) {
-	return c.GenerateThink(ctx, system, user, true)
+	return c.generate(ctx, system, user, true, false)
 }
 
-// GenerateThink runs one Messages call; think toggles extended thinking, and
-// the web_search server tool is attached when the client was built with it.
+// GenerateThink runs one Messages call WITHOUT web search. Used for structured
+// / utility calls (routing, player-name translation) whose output must stay
+// clean JSON/text — attaching web_search makes the model emit tool-call markup.
 func (c *AnthropicClient) GenerateThink(ctx context.Context, system, user string, think bool) (string, error) {
+	return c.generate(ctx, system, user, think, false)
+}
+
+// GenerateSearch runs one Messages call WITH the web_search server tool (when
+// the client was built with web search enabled) — for the conversational /ask
+// and @-engage answers that fact-check online.
+func (c *AnthropicClient) GenerateSearch(ctx context.Context, system, user string, think bool) (string, error) {
+	return c.generate(ctx, system, user, think, c.webSearch)
+}
+
+func (c *AnthropicClient) generate(ctx context.Context, system, user string, think, search bool) (string, error) {
 	if c.apiKey == "" {
 		return "", errors.New("llm api key not configured")
 	}
@@ -108,7 +121,7 @@ func (c *AnthropicClient) GenerateThink(ctx context.Context, system, user string
 		// budget_tokens must be < max_tokens for Anthropic; DeepSeek ignores it.
 		reqBody.Thinking = &anthropicThinking{Type: "enabled", BudgetTokens: 2048}
 	}
-	if c.webSearch {
+	if search {
 		reqBody.Tools = []anthropicTool{{Type: "web_search_20250305", Name: "web_search", MaxUses: 5}}
 	}
 	raw, err := json.Marshal(reqBody)
