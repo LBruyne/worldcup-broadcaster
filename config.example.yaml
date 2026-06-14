@@ -6,9 +6,9 @@ onebot:
   access_token: ""                     # ←必填：与 NapCat 配置的 token 一致（setup 脚本会生成并打印）
   group_ids: []                        # ←必填：目标 QQ 群号列表，第一个建议填测试群（演习只打第一个群），如 [123456789, 987654321]
   admin_qq: 0                          # ←必填：接收告警的管理员 QQ 号
-  send_interval_ms: 3000               # 群消息发送最小间隔（防风控）
+  send_interval_ms: 4000               # 发送节奏基准（防风控）。实际间隔=基准+按消息长度递增+连发(换人/黄牌等)递增惩罚，封顶30s，带±25%随机抖动，越像真人越不易被封
   listen_addr: "127.0.0.1:3100"        # 接收 NapCat 群消息上报（/ask 等命令）；留空禁用
-  keepalive_interval_min: 3            # QQ 在线探测间隔（分钟）；0 禁用
+  keepalive_interval_min: 1            # QQ 在线探测间隔（分钟）；首次失败后20s快速复探，掉线检测更及时；0 禁用
   restart_cmd: "docker restart napcat"    # 仅当NapCat进程本身死掉时执行（QQ掉线但WebUI存活=等人工扫码，不重启）
   webui_url: "http://127.0.0.1:6099"       # NapCat WebUI 存活探测地址
   qr_sync_cmd: "docker cp napcat:/app/napcat/cache/qrcode.png /root/worldcup-broadcaster/qrcode-login.png && docker cp napcat:/app/napcat/cache/qrcode.png /opt/worldcup/qrcode-login.png"  # 掉线时保持二维码最新
