@@ -38,10 +38,6 @@ type OneBot struct {
 	QRSyncCmd string `yaml:"qr_sync_cmd"`
 	// QRFile is where QRSyncCmd leaves the latest login QR image.
 	QRFile string `yaml:"qr_file"`
-	// QRURLCmd runs (sh -c) and prints the QR's decoded login URL — NapCat logs
-	// it as "二维码解码URL: https://txz.qq.com/p?k=...". The scan page turns it
-	// into a one-tap "用本机QQ登录" link. Empty hides the button.
-	QRURLCmd string `yaml:"qr_url_cmd"`
 	// QRServeAddr, when set (e.g. "0.0.0.0:8090"), serves an auto-
 	// refreshing scan page at /qr/<qr_token>/ so the QR never goes stale.
 	QRServeAddr string `yaml:"qr_serve_addr"`

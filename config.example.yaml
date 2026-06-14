@@ -13,7 +13,6 @@ onebot:
   webui_url: "http://127.0.0.1:6099"       # NapCat WebUI 存活探测地址
   qr_sync_cmd: "docker cp napcat:/app/napcat/cache/qrcode.png /root/worldcup-broadcaster/qrcode-login.png && docker cp napcat:/app/napcat/cache/qrcode.png /opt/worldcup/qrcode-login.png"  # 掉线时保持二维码最新
   qr_file: "/opt/worldcup/qrcode-login.png"
-  qr_url_cmd: 'docker logs napcat --tail 80 2>&1 | grep -oE "https://txz.qq.com/p\?k=[^ ]+" | tail -1'  # 取二维码解码URL，扫码页据此显示"一键用本机QQ登录"按钮；留空则隐藏该按钮
   qr_serve_addr: "0.0.0.0:8090"        # 自刷新扫码页监听地址
   qr_public_url: ""  # 钉钉消息里的外链基址
   qr_token: ""
